@@ -21,7 +21,11 @@ export default function Home() {
       setInitData(t.initData || "");
     }
   }, []);
-
+  useEffect(() => {
+  if (typeof window !== "undefined" && window.MathJax) {
+    window.MathJax.typesetPromise?.();
+  }
+}, [advice]);
   // Инициализировать профиль из localStorage
   useEffect(() => {
     if (typeof window === "undefined") return;
