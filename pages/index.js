@@ -21,13 +21,6 @@ export default function Home() {
       setInitData(t.initData || "");
     }
   }, []);
-  useEffect(() => {
-  if (typeof window !== "undefined" && window.MathJax) {
-    // перерендер формул после смены текста
-    window.MathJax.typesetPromise?.()
-      .catch(err => console.error("MathJax render error:", err));
-  }
-}, [advice]);
   // Инициализировать профиль из localStorage
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -109,6 +102,15 @@ export default function Home() {
     }
   };
 
+  useEffect(() => {
+  if (typeof window !== "undefined" && window.MathJax) {
+    // Отрисовываем формулы только внутри блока с id="out"
+    const el = document.getElementById("out");
+    window.MathJax.typesetPromise?.([el])
+      .catch(err => console.error("MathJax render error:", err));
+  }
+}, [advice]);
+
   return (
     <>
       <Head>
@@ -161,7 +163,7 @@ export default function Home() {
         </section>
 
         <section className="card">
-          <pre className="out">{advice}</pre>
+          <pre id="out" className="out">{advice}</pre>
         </section>
       </div>
     </>
