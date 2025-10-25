@@ -23,7 +23,9 @@ export default function Home() {
   }, []);
   useEffect(() => {
   if (typeof window !== "undefined" && window.MathJax) {
-    window.MathJax.typesetPromise?.();
+    // перерендер формул после смены текста
+    window.MathJax.typesetPromise?.()
+      .catch(err => console.error("MathJax render error:", err));
   }
 }, [advice]);
   // Инициализировать профиль из localStorage
