@@ -110,6 +110,11 @@ export default function Home() {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         {/* Telegram WebApp SDK */}
         <script src="https://telegram.org/js/telegram-web-app.js" />
+        <script
+        id="mathjax"
+      async
+        src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
+      ></script>
         <link rel="stylesheet" href="/styles.css" />
       </Head>
       <div className="container">
