@@ -1,5 +1,5 @@
-import { verifyTelegramInitData, extractUserId } from "@/lib/verifyTelegram";
-import { generateTip } from "@/lib/llm";
+import { verifyTelegramInitData, extractUserId } from "../../lib/verifyTelegram";
+import { generateTip } from "../../lib/llm";
 
 export const config = {
   runtime: "nodejs" // (по умолчанию) — подойдёт для Vercel
