@@ -1,0 +1,17 @@
+:root { --bg:#0f1115; --card:#171a21; --text:#eaeef5; --muted:#a5b0c2; --pri:#4f8cff; }
+body { margin:0; font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;
+       background:#f6f7fb; color:#1f2328; }
+.tg-dark body { background:var(--bg); color:var(--text); }
+.container { max-width:720px; margin:24px auto; padding:0 16px; }
+h1 { margin:6px 0; font-size:24px; }
+.muted{ color:#6b7280; }
+.tg-dark .muted{ color:var(--muted); }
+.card { background:#fff; border-radius:14px; padding:14px; margin:12px 0; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+.tg-dark .card{ background:var(--card); box-shadow:none; }
+label{ display:block; margin-bottom:8px; font-weight:600; }
+select, textarea { width:100%; box-sizing:border-box; padding:10px; border-radius:10px; border:1px solid #d0d7de; background:#fff; }
+.tg-dark select, .tg-dark textarea{ background:#0f1115; color:var(--text); border-color:#2a2f3a; }
+button { padding:10px 14px; border:none; border-radius:10px; background:#e9eef7; cursor:pointer; margin-right:8px; }
+button.primary { background:var(--pri); color:#fff; }
+.tg-dark button{ background:#2a2f3a; color:var(--text); }
+.out { white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
