@@ -2,9 +2,14 @@
 module.exports = {
     darkMode: 'class',
     content: [
-        './pages/**/*.{ts,tsx,js,jsx}', // Pages Router (у тебя есть pages/index.tsx и др.)
-        './components/**/*.{ts,tsx,js,jsx}', // общие компоненты
-        './app/**/*.{ts,tsx,js,jsx}', // если вдруг будут файлы в App Router
+        './pages/*.{ts,tsx,js,jsx}', // файлы прямо в pages/
+        './pages/**/*.{ts,tsx,js,jsx}', // файлы в подпапках pages/**
+
+        './components/*.{ts,tsx,js,jsx}',
+        './components/**/*.{ts,tsx,js,jsx}',
+
+        './app/*.{ts,tsx,js,jsx}', // на будущее, если перейдёшь на App Router
+        './app/**/*.{ts,tsx,js,jsx}',
     ],
     theme: {
         extend: {
