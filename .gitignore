@@ -7,3 +7,7 @@ vendor/
 npm-debug.log*
 dist/
 build/
+backend/.venv/
+backend/app/__pycache__/
+frontend/.next/
+frontend/node_modules/
