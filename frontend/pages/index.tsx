@@ -21,7 +21,10 @@ export default function Home() {
 
     async function send() {
         if (!input.trim() || streaming) return;
-        const next = [...messages, { role: 'user', content: input }];
+        const next: Msg[] = [
+            ...messages,
+            { role: 'user' as Role, content: input },
+        ];
         setMessages(next);
         setInput('');
         setStreaming(true);
