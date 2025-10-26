@@ -1,4 +1,4 @@
-node_modules/
+gitnode_modules/
 vendor/ 
 .env.local
 .env.*.local
