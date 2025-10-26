@@ -1,0 +1,12 @@
+services:
+    - type: web
+      name: llm-backend
+      env: docker
+      plan: free
+      autoDeploy: true
+      healthCheckPath: /health
+      envVars:
+          - key: OPENAI_API_KEY
+            sync: false
+          - key: ALLOWED_ORIGINS
+            sync: false
