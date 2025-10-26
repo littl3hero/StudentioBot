@@ -5,11 +5,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from dotenv import load_dotenv
-
-# ---- env ----
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+from app.deps import settings
+OPENAI_API_KEY = settings.OPENAI_API_KEY
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 ORIGINS = [o.strip() for o in os.getenv("ALLOW_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
