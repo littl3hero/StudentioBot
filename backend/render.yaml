@@ -1,12 +1,14 @@
 services:
     - type: web
-      name: llm-backend
+      name: studentio-backend
       env: docker
       plan: free
-      autoDeploy: true
       healthCheckPath: /health
+      autoDeploy: true
       envVars:
           - key: OPENAI_API_KEY
             sync: false
-          - key: ALLOWED_ORIGINS
-            sync: false
+          - key: OPENAI_MODEL
+            value: gpt-4o-mini
+          - key: ALLOW_ORIGINS
+            value: https://studentio-bot.vercel.app,http://localhost:3000

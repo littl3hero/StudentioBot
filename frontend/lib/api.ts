@@ -1,53 +1,90 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+// frontend/lib/api.ts
+export const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:10000';
 
-type FetchOptions = {
-    method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-    body?: any;
-    headers?: Record<string, string>;
-};
-
-async function request<T>(path: string, opts: FetchOptions = {}): Promise<T> {
-    if (!API_BASE) throw new Error('API_BASE is not configured');
-    const res = await fetch(`${API_BASE}${path}`, {
-        method: opts.method || 'GET',
-        headers: {
-            'Content-Type': 'application/json',
-            ...(opts.headers || {}),
-        },
-        body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text}`);
-    }
-    return res.json();
-}
+/* ---------- Student (legacy API совместимость) ---------- */
 
 export type StudentProfile = {
     name: string;
     goals: string;
-    level: string;
+    level: string; // "beginner" | "intermediate" | "advanced"
     notes: string;
 };
 
-export async function saveStudentProfile(profile: StudentProfile) {
-    return request<{ ok: boolean; id?: string }>('/student', {
-        method: 'POST',
-        body: profile,
-    });
+export async function getStudentProfile(): Promise<StudentProfile> {
+    const r = await fetch(`${API_BASE}/student`, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`getStudentProfile failed: ${r.status}`);
+    return r.json();
 }
 
-export async function getStudentProfile() {
-    return request<StudentProfile>('/student');
+export async function saveStudentProfile(profile: StudentProfile) {
+    const r = await fetch(`${API_BASE}/student`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(profile),
+    });
+    if (!r.ok) throw new Error(`saveStudentProfile failed: ${r.status}`);
+    return r.json();
 }
+
+/* ---------- Legacy quiz (если ещё используешь /tests/generate) ---------- */
 
 export async function generateQuiz(topic: string, level: string) {
-    return request<{
-        questions: {
-            id: string;
-            text: string;
-            options: string[];
-            answer?: number;
-        }[];
-    }>('/tests/generate', { method: 'POST', body: { topic, level } });
+    const r = await fetch(`${API_BASE}/tests/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, level }),
+    });
+    if (!r.ok) throw new Error(`tests/generate failed: ${r.status}`);
+    return r.json();
+}
+
+/* ---------- Multi-agent endpoints ---------- */
+
+export type ChatMsg = {
+    role: 'system' | 'user' | 'assistant';
+    content: string;
+};
+
+export async function curatorFromChat(input: {
+    student_id: string;
+    level: 'beginner' | 'intermediate' | 'advanced';
+    topic: string;
+    messages: ChatMsg[];
+    make_exam?: boolean;
+    count?: number;
+}) {
+    const r = await fetch(`${API_BASE}/v1/agents/curator/from_chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+    });
+    if (!r.ok) throw new Error(`curator/from_chat failed: ${r.status}`);
+    return r.json(); // { ok, topic, goals, errors, profile, exam? }
+}
+
+export async function examinerGenerate(count: number) {
+    const r = await fetch(`${API_BASE}/v1/agents/examiner`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count }),
+    });
+    if (!r.ok) throw new Error(`examiner failed: ${r.status}`);
+    return r.json(); // { ok, questions, rubric }
+}
+
+export async function sessionLearn(input: {
+    student_id: string;
+    goals: string;
+    errors: string[];
+    level: 'beginner' | 'intermediate' | 'advanced';
+    count?: number;
+}) {
+    const r = await fetch(`${API_BASE}/v1/agents/session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+    });
+    if (!r.ok) throw new Error(`session learn failed: ${r.status}`);
+    return r.json(); // { ok, profile, exam }
 }
