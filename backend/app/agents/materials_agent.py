@@ -1,5 +1,6 @@
 # app/agents/materials_agent.py
 import json
+import re
 from typing import List, Dict, Any, Optional
 from app.deps import settings
 from app.memory.vector_store_pg import get_conn, get_last_curator_snapshot
@@ -42,23 +43,29 @@ def _generate_materials_with_llm(
 
     model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
     prompt = f"""
-Ты — учебный ассистент. Создай 2–3 материала под студента:
+Ты — учебный ассистент. Создай 4–6 РАЗНЫХ материалов под студента.
+Дано:
 - Уровень: {level}
 - Темы: {', '.join(topics) or 'базовые понятия'}
 - Проблемы: {', '.join(weaknesses) or 'нет данных'}
 
-Ответ строго в JSON:
+Сделай минимум:
+- 1 подробный конспект теории;
+- 1 шпаргалку по типичным ошибкам;
+- 1 подборку задач или полезных ссылок.
+
+Ответь строго в формате JSON **без пояснений и текста вокруг**:
+
 {{
   "materials": [
     {{
-      "title": "...",
-      "type": "notes|cheat_sheet|link",
-      "content": "... или null",
-      "url": "... или null"
+      "title": "краткий заголовок",
+      "type": "notes | cheat_sheet | link",
+      "url": "ссылка или null",
+      "content": "текст конспекта/шпаргалки или null"
     }}
   ]
 }}
-Без пояснений.
 """
 
     try:
@@ -94,7 +101,7 @@ def _sanitize_materials(raw: List[Dict]) -> List[Dict[str, Any]]:
             "url": str(m.get("url")) if m.get("url") else None,
             "content": str(m.get("content")) if m.get("content") else None,
         })
-    return out[:3]  # максимум 3 материала
+    return out  # максимум 3 материала
 
 
 def _fallback_materials(level: str, topics: List[str], weaknesses: List[str]) -> List[Dict[str, Any]]:
@@ -125,34 +132,74 @@ def _fallback_materials(level: str, topics: List[str], weaknesses: List[str]) ->
 
 
 def _extract_profile(student_id: str) -> Dict[str, Any]:
-    """Берёт профиль из последнего среза куратора (как в examiner.py)."""
+    """
+    Берём профиль из последнего среза куратора:
+    - сначала пробуем meta;
+    - если там нет topics/weaknesses, вытаскиваем их из JSON profile в поле text.
+    Логика такая же, как в examiner._extract_from_snapshot.
+    """
     snap = get_last_curator_snapshot(student_id)
     if not snap:
         return {"level": "beginner", "topics": ["базовые понятия"], "weaknesses": []}
 
+    topics: List[str] = []
+    weaknesses: List[str] = []
+    level = "beginner"
+
     meta = snap.get("meta") or {}
     if isinstance(meta, dict):
-        level = meta.get("level", "beginner")
-        topics = [str(x) for x in meta.get("topics", []) if str(x).strip()]
-        weaknesses = [str(x) for x in meta.get("errors", []) if str(x).strip()]
-        return {"level": level, "topics": topics, "weaknesses": weaknesses}
+        level = meta.get("level", level)
+        if isinstance(meta.get("topics"), list):
+            topics = [str(x) for x in meta["topics"] if str(x).strip()]
+        if isinstance(meta.get("errors"), list):
+            weaknesses = [str(x) for x in meta["errors"] if str(x).strip()]
 
-    return {"level": "beginner", "topics": ["базовые понятия"], "weaknesses": []}
+    # если из meta не достали — парсим JSON profile внутри text
+    if not topics or not weaknesses:
+        text = snap.get("text") or ""
+        m = re.search(r'profile:\s*(\{.*\})', text, re.IGNORECASE | re.DOTALL)
+        if m:
+            try:
+                prof = json.loads(m.group(1))
+                if not topics:
+                    topics = [str(x) for x in prof.get("topics", []) if str(x).strip()]
+                if not weaknesses:
+                    weaknesses = [str(x) for x in prof.get("weaknesses", []) if str(x).strip()]
+                if "level" in prof:
+                    level = prof.get("level") or level
+            except Exception:
+                pass
+
+    topics = topics[:5] if topics else ["базовые понятия"]
+    weaknesses = weaknesses[:5] if weaknesses else []
+    return {"level": level, "topics": topics, "weaknesses": weaknesses}
+
 
 
 def _save_materials_to_db(student_id: str, materials: List[Dict[str, Any]]):
-    """Сохраняет материалы в БД (предварительно удаляя старые для этого студента)."""
+    """Сохраняет материалы в БД, не дублируя заголовки для одного студента."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM materials WHERE student_id = %s", (student_id,))
+            # достаём уже существующие заголовки
+            cur.execute(
+                "SELECT title FROM materials WHERE student_id = %s",
+                (student_id,)
+            )
+            existing_titles = {row[0] for row in cur.fetchall()}
+
             for m in materials:
+                title = m["title"]
+                if title in existing_titles:
+                    continue  # такой уже есть — пропускаем
+                existing_titles.add(title)
                 cur.execute(
                     """
                     INSERT INTO materials (student_id, title, type, url, content)
                     VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (student_id, m["title"], m["type"], m["url"], m["content"]),
+                    (student_id, title, m["type"], m["url"], m["content"]),
                 )
+
 
 
 def generate_and_save_materials(student_id: str = "default") -> List[Dict[str, Any]]:

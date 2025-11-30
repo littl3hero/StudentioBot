@@ -60,10 +60,11 @@ export default function MaterialsPage() {
         setGenerating(true);
         setError(null);
         try {
-            const data = await generateMaterials(studentId);
-            if (data?.materials) {
-                setMaterials(data.materials);
-            }
+            // 1) сгенерили и сохранили в БД
+            await generateMaterials(studentId);
+            // 2) вытянули ВСЕ материалы этого студента
+            const all = await listMaterials(studentId);
+            setMaterials(all);
         } catch (e) {
             console.error(e);
             setError('Ошибка при генерации материалов. Попробуй ещё раз.');
