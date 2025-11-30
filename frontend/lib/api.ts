@@ -88,3 +88,38 @@ export async function sessionLearn(input: {
     if (!r.ok) throw new Error(`session learn failed: ${r.status}`);
     return r.json(); // { ok, profile, exam }
 }
+
+// ---------- Materials agent ----------
+
+export type Material = {
+    title: string;
+    type: 'link' | 'notes' | 'cheat_sheet';
+    url?: string | null;
+    content?: string | null;
+};
+
+export async function generateMaterials(
+    student_id: string = 'default'
+): Promise<{ ok: boolean; materials: Material[] }> {
+    const r = await fetch(`${API_BASE}/v1/agents/materials/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_id }),
+    });
+    if (!r.ok) throw new Error(`materials/generate failed: ${r.status}`);
+    return r.json();
+}
+
+export async function listMaterials(
+    student_id: string = 'default'
+): Promise<Material[]> {
+    const params = new URLSearchParams();
+    if (student_id) params.set('student_id', student_id);
+
+    const r = await fetch(
+        `${API_BASE}/v1/agents/materials?${params.toString()}`,
+        { cache: 'no-store' }
+    );
+    if (!r.ok) throw new Error(`materials get failed: ${r.status}`);
+    return r.json();
+}
