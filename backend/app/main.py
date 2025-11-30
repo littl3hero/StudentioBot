@@ -1,10 +1,15 @@
+# main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.deps import settings
 from app.routers import legacy_api, agents
+from app.agents.materials_agent import init_materials_table  # ← добавь импорт
 
 # ---- Инициализация приложения ----
 app = FastAPI(title="Studentio Backend")
+
+# ---- Создаём таблицу при запуске ----
+init_materials_table()  # ← добавь эту строку
 
 # ---- CORS ----
 app.add_middleware(
@@ -16,8 +21,8 @@ app.add_middleware(
 )
 
 # ---- Подключение роутеров ----
-app.include_router(legacy_api.router)   # старое API (student, tests, chat)
-app.include_router(agents.router)       # мультиагенты (куратор, экзаменатор, orchestrator)
+app.include_router(legacy_api.router)
+app.include_router(agents.router)
 
 @app.get("/health")
 def health():

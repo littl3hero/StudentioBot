@@ -1,51 +1,74 @@
 # app/memory/vector_store_pg.py
 from __future__ import annotations
+
 import json
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import psycopg
 from psycopg.rows import dict_row
 
-from openai import OpenAI
-from openai import RateLimitError, APIConnectionError, APIStatusError, AuthenticationError
-
 from app.deps import settings
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+# ===== ЛОКАЛЬНЫЕ ЭМБЕДДИНГИ =====
+try:
+    from sentence_transformers import SentenceTransformer
+
+    # одна модель на всё приложение
+    _emb_model: Optional[SentenceTransformer] = SentenceTransformer(
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
+    print("[embeddings] sentence-transformers model loaded: all-MiniLM-L6-v2")
+except Exception as e:
+    print(f"[embeddings] sentence-transformers unavailable, semantic search disabled: {e}")
+    _emb_model = None
 
 
 def get_conn():
-    # autocommit удобен для простых INSERT/SELECT
+    """
+    Подключение к Postgres. autocommit удобен для простых INSERT/SELECT.
+    """
     return psycopg.connect(settings.DATABASE_URL, autocommit=True)
 
 
 def embed_text(text: str) -> Optional[List[float]]:
-    """Вернуть вектор, либо None если embeddings недоступны (квота/ключ/сеть)."""
-    if not settings.OPENAI_API_KEY:
+    """
+    Считаем эмбеддинг ЛОКАЛЬНО через sentence-transformers.
+    Никакого OpenAI нет.
+
+    Возвращаем:w
+      - список float (вектор)
+      - либо None, если модель не доступна / текст пустой / ошибка.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if _emb_model is None:
         return None
     try:
-        model = getattr(settings, "EMBEDDINGS_MODEL", None) or "text-embedding-3-small"
-        resp = client.embeddings.create(model=model, input=text)
-        return resp.data[0].embedding
-    except (RateLimitError, AuthenticationError, APIConnectionError, APIStatusError) as e:
-        print(f"[embeddings] disabled due to API error: {e}")
-        return None
+        vec = _emb_model.encode(text)  # numpy-массив
+        return [float(x) for x in vec]
     except Exception as e:
-        print(f"[embeddings] unexpected error: {e}")
+        print(f"[embeddings] local model error: {e}")
         return None
 
 
 def _to_vector_literal(vec: List[float]) -> str:
-    # pgvector приемлет строку вида: [0.1,0.2,0.3]
+    """
+    Превращаем список чисел в строку вида: [0.1,0.2,0.3]
+    Такой формат понимает pgvector (тип vector).
+    """
     return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
 
 
 def save_memory(student_id: str, text: str, meta: dict):
-    """Сохраняем запись. Если embeddings не доступны — пишем NULL."""
+    """
+    Сохраняем запись в student_memory.
+    Если embeddings не доступны — пишем NULL в колонку embedding.
+    """
     emb = embed_text(text)
     with get_conn() as conn:
         with conn.cursor() as cur:
-            if emb:
+            if emb is not None:
                 emb_lit = _to_vector_literal(emb)
                 cur.execute(
                     """
@@ -66,14 +89,18 @@ def save_memory(student_id: str, text: str, meta: dict):
 
 def retrieve_memory(query: str, k: int = 3, student_id: Optional[str] = None) -> List[str]:
     """
-    1) Если есть embeddings — используем векторный поиск.
+    Быстрый поиск по памяти студента.
+
+    1) Если есть embeddings — используем векторный поиск (pgvector, оператор <->).
     2) Иначе пробуем триграммы (pg_trgm): ORDER BY similarity(text, %s) DESC.
-    3) Если и это недоступно — просто берём последние записи.
+    3) Если и это недоступно — просто берём несколько последних записей.
+
+    Возвращаем список text-записей.
     """
     emb = embed_text(query)
     with get_conn() as conn:
-        # Векторный режим
-        if emb:
+        # --- 1. Векторный режим (pgvector) ---
+        if emb is not None:
             emb_lit = _to_vector_literal(emb)
             with conn.cursor(row_factory=dict_row) as cur:
                 if student_id:
@@ -98,9 +125,10 @@ def retrieve_memory(query: str, k: int = 3, student_id: Optional[str] = None) ->
                         (emb_lit, k),
                     )
                 rows = cur.fetchall()
-                return [r["text"] for r in rows]
+                if rows:
+                    return [r["text"] for r in rows]
 
-        # Fallback: триграммы, если расширение pg_trgm доступно
+        # --- 2. Fallback: триграммы (pg_trgm / similarity) ---
         try:
             with conn.cursor(row_factory=dict_row) as cur:
                 if student_id:
@@ -128,50 +156,78 @@ def retrieve_memory(query: str, k: int = 3, student_id: Optional[str] = None) ->
                 if rows:
                     return [r["text"] for r in rows]
         except Exception as e:
+            # если нет расширения pg_trgm / similarity → просто логируем
             print(f"[retrieve_memory] trigram fallback unavailable: {e}")
 
-        # Last resort: просто несколько последних (без сортировки по похожести)
+        # --- 3. Last resort: просто последние записи ---
         with conn.cursor(row_factory=dict_row) as cur:
             if student_id:
                 cur.execute(
-                    "SELECT text FROM student_memory WHERE student_id = %s ORDER BY id DESC LIMIT %s",
+                    """
+                    SELECT text
+                    FROM student_memory
+                    WHERE student_id = %s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
                     (student_id, k),
                 )
             else:
-                cur.execute("SELECT text FROM student_memory ORDER BY id DESC LIMIT %s", (k,))
+                cur.execute(
+                    """
+                    SELECT text
+                    FROM student_memory
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (k,),
+                )
             rows = cur.fetchall()
             return [r["text"] for r in rows]
+
+
 # --- helpers to read last curator assessment safely ---
-from typing import Optional, List, Dict
-from psycopg.rows import dict_row
+
 
 def fetch_recent_memory(student_id: str, kind: Optional[str] = None, limit: int = 1) -> List[Dict]:
+    """
+    Вытаскиваем последние записи по студенту, опционально фильтруя по meta->>'kind'.
+    Используется Куратором/Экзаменатором для чтения последних оценок.
+    """
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         if kind:
             cur.execute(
-                """SELECT id, text, meta
-                   FROM student_memory
-                   WHERE student_id=%s AND (meta->>'kind')=%s
-                   ORDER BY id DESC
-                   LIMIT %s""",
+                """
+                SELECT id, text, meta
+                FROM student_memory
+                WHERE student_id = %s AND (meta->>'kind') = %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
                 (student_id, kind, limit),
             )
         else:
             cur.execute(
-                """SELECT id, text, meta
-                   FROM student_memory
-                   WHERE student_id=%s
-                   ORDER BY id DESC
-                   LIMIT %s""",
+                """
+                SELECT id, text, meta
+                FROM student_memory
+                WHERE student_id = %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
                 (student_id, limit),
             )
         return cur.fetchall()
 
+
 def get_last_curator_snapshot(student_id: str) -> Optional[Dict]:
-    # сначала пробуем по kind='curator_assessment'
+    """
+    Пытаемся взять последнюю оценку куратора:
+    - сначала по kind='curator_assessment'
+    - если нет — просто последнюю запись студента.
+    """
     rows = fetch_recent_memory(student_id, kind="curator_assessment", limit=1)
     if rows:
         return rows[0]
-    # иначе — просто последняя запись
     rows = fetch_recent_memory(student_id, kind=None, limit=1)
     return rows[0] if rows else None

@@ -1,0 +1,11 @@
+# локальное окружение
+.venv
+
+__pycache__/
+*.pyc
+*.pyo
+
+.git
+.gitignore
+
+.env

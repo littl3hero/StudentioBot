@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
     ALLOWED_ORIGINS: str = "http://localhost:3000"
     DATABASE_URL: str
+    OPENAI_MODEL: str
 
     @property
     def origins(self) -> List[str]:

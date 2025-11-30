@@ -9,7 +9,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.deps import settings
-from app.agents import curator, examiner
+from app.agents import curator, examiner, materials_agent  # ← добавлен materials_agent
 
 # Опционально используем LLM для извлечения goals/errors из диалога (с фолбэком)
 try:
@@ -216,3 +216,21 @@ async def examiner_route(req: ExaminerReq):
         "questions": questions,
         "rubric": data.get("rubric", "1 балл за верный ответ."),
     }
+
+
+# ====== ТВОЙ АГЕНТ: МАТЕРИАЛЫ ======
+class MaterialsRequest(BaseModel):
+    student_id: str = "default"
+
+
+@router.post("/materials/generate")
+def generate_materials(req: MaterialsRequest):
+    """Генерирует персонализированные материалы для студента."""
+    materials = materials_agent.generate_and_save_materials(req.student_id)
+    return {"ok": True, "materials": materials}
+
+
+@router.get("/materials")
+def get_materials(student_id: str = "default"):
+    """Возвращает материалы для студента."""
+    return materials_agent.get_materials_for_student(student_id)
