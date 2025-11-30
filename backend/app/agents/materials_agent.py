@@ -88,20 +88,37 @@ def _generate_materials_with_llm(
         print(f"[materials_agent] LLM parse error: {e}")
         return _fallback_materials(level, topics, weaknesses)
 
+def _material_key(m: Dict[str, Any]) -> str:
+    """Уникальный ключ материала для отсечения дублей."""
+    title = (m.get("title") or "").strip()
+    typ = (m.get("type") or "").strip()
+    url = (m.get("url") or "" or "").strip()
+    content = (m.get("content") or "").strip()
+    return f"{title}||{typ}||{url}||{content}"
 
 def _sanitize_materials(raw: List[Dict]) -> List[Dict[str, Any]]:
     out = []
+    seen: set[str] = set()
+
     for m in raw:
         typ = m.get("type", "notes")
         if typ not in {"link", "notes", "cheat_sheet"}:
             typ = "notes"
-        out.append({
+
+        normalized = {
             "title": str(m.get("title") or "Без названия")[:100],
             "type": typ,
             "url": str(m.get("url")) if m.get("url") else None,
             "content": str(m.get("content")) if m.get("content") else None,
-        })
-    return out  # максимум 3 материала
+        }
+
+        key = _material_key(normalized)
+        if key in seen:
+            continue  # дубликат в одной генерации
+        seen.add(key)
+        out.append(normalized)
+
+    return out
 
 
 def _fallback_materials(level: str, topics: List[str], weaknesses: List[str]) -> List[Dict[str, Any]]:
@@ -177,28 +194,51 @@ def _extract_profile(student_id: str) -> Dict[str, Any]:
 
 
 def _save_materials_to_db(student_id: str, materials: List[Dict[str, Any]]):
-    """Сохраняет материалы в БД, не дублируя заголовки для одного студента."""
+    """
+    Сохраняет материалы в БД, копя историю, но не дублируя уже существующие
+    (по title+type+url+content).
+    """
+    if not materials:
+        return
+
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # достаём уже существующие заголовки
+            # 1) берём уже существующие материалы студента
             cur.execute(
-                "SELECT title FROM materials WHERE student_id = %s",
-                (student_id,)
+                """
+                SELECT title, type, url, content
+                FROM materials
+                WHERE student_id = %s
+                """,
+                (student_id,),
             )
-            existing_titles = {row[0] for row in cur.fetchall()}
+            existing_keys: set[str] = set()
+            for title, typ, url, content in cur.fetchall():
+                existing_keys.add(
+                    _material_key(
+                        {
+                            "title": title,
+                            "type": typ,
+                            "url": url,
+                            "content": content,
+                        }
+                    )
+                )
 
+            # 2) вставляем только новые
             for m in materials:
-                title = m["title"]
-                if title in existing_titles:
-                    continue  # такой уже есть — пропускаем
-                existing_titles.add(title)
+                key = _material_key(m)
+                if key in existing_keys:
+                    continue  # уже есть — пропускаем
+                existing_keys.add(key)
                 cur.execute(
                     """
                     INSERT INTO materials (student_id, title, type, url, content)
                     VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (student_id, title, m["type"], m["url"], m["content"]),
+                    (student_id, m["title"], m["type"], m["url"], m["content"]),
                 )
+
 
 
 
