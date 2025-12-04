@@ -39,8 +39,23 @@ export default function TestsPage() {
         setRubric('');
         setAnswers({});
         setScore(null);
+
         try {
-            const data = await examinerGenerate(count);
+            // вытащим student_id из того же профиля, что сохраняет куратор
+            let student_id = 'default';
+            try {
+                const raw = localStorage.getItem('studentio_profile');
+                if (raw) {
+                    const p = JSON.parse(raw);
+                    if (p?.student_id) {
+                        student_id = p.student_id;
+                    }
+                }
+            } catch {
+                // если что-то пошло не так — используем 'default'
+            }
+
+            const data = await examinerGenerate(count, student_id);
             setQuestions((data?.questions || []).slice(0, count));
             setRubric(data?.rubric || '');
         } catch (e) {
@@ -50,13 +65,10 @@ export default function TestsPage() {
                 {
                     id: 'q1',
                     text: '(fallback) Тренировочный вопрос',
-                    options: ['A', 'B', 'C', 'D'],
-                    answer: 1,
-                    solution: 'Ответ B',
-                    difficulty: 'easy',
+                    options: ['Ответ 1', 'Ответ 2', 'Ответ 3', 'Ответ 4'],
                 },
             ]);
-            setRubric('1 балл за верный ответ.');
+            setRubric('');
         } finally {
             setLoading(false);
         }

@@ -9,7 +9,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.deps import settings
-from app.agents import curator, examiner, materials_agent  # ← добавлен materials_agent
+from app.agents import curator, examiner, materials_agent, orchestrator  # ← добавлен materials_agent и orchestrator
+
 
 # Опционально используем LLM для извлечения goals/errors из диалога (с фолбэком)
 try:
@@ -33,6 +34,34 @@ class ChatMsg(BaseModel):
     role: Role
     content: str
 
+class PlanStep(BaseModel):
+    id: str
+    type: Literal["exam", "materials", "chat", "other"]
+    title: str
+    description: str
+    meta: Dict[str, Any] = {}
+    status: Literal["prepared", "pending", "error"] = "pending"
+
+
+class OrchestratorBlock(BaseModel):
+    instruction_message: str
+    plan_steps: List[PlanStep] = []
+
+    # Какому агенту «передать ход» дальше:
+    # - examiner  → страница с тестами
+    # - materials → страница с материалами
+    # - curator   → остаться в чате куратора
+    # - none      → никуда автоматически не идти
+    next_agent: Optional[Literal["examiner", "materials", "curator", "none"]] = "none"
+
+    # Какой фронтовый route стоит открыть следующем (если не None)
+    # Например: "/tests" или "/materials"
+    auto_route: Optional[str] = None
+
+    # ID шага плана, который считается «главным» (первый приоритет)
+    primary_step_id: Optional[str] = None
+
+
 
 class CuratorFromChatRequest(BaseModel):
     student_id: str = "default"
@@ -50,6 +79,7 @@ class CuratorFromChatResponse(BaseModel):
     errors: List[str]
     profile: Dict[str, Any]
     exam: Optional[Dict[str, Any]] = None
+    orchestrator: Optional[OrchestratorBlock] = None
 
 
 class ExaminerReq(BaseModel):
@@ -172,7 +202,8 @@ async def curator_from_chat(req: CuratorFromChatRequest):
     """
     1) Извлекаем цели/ошибки из переписки (LLM → эвристика).
     2) Вызываем Куратора (он подтянет память, применит LLM/эвристику и сохранит срез).
-    3) (Опционально) генерим экзамен с учётом профиля.
+    3) Вызываем оркестратора, который строит план и при необходимости дергает под-агентов.
+    4) (Опционально) дополнительно генерим экзамен прямо сейчас, если make_exam=True.
     """
     # шаг 1: goals/errors
     extracted = _llm_extract(req.messages, req.topic) or _heuristic_extract(req.messages, req.topic)
@@ -186,15 +217,25 @@ async def curator_from_chat(req: CuratorFromChatRequest):
         student_id=req.student_id,
     )
 
+    # шаг 3: строим план и дергаем под-агентов
+    orchestrator_block = None
+    try:
+        orchestrator_block = await orchestrator.plan_and_execute(student_id=req.student_id, profile=profile)
+    except Exception as e:
+        # не ломаем основной ответ из-за ошибок оркестратора
+        print(f"[agents.curator_from_chat] orchestrator failed: {e}")
+        orchestrator_block = None
+
     resp: Dict[str, Any] = {
         "ok": True,
         "topic": req.topic or goals,
         "goals": goals,
         "errors": errors,
         "profile": profile,
+        "orchestrator": orchestrator_block,
     }
 
-    # шаг 3: при необходимости сразу делаем экзамен
+    # шаг 4: при необходимости сразу делаем экзамен и возвращаем его в ответе
     if req.make_exam:
         data = examiner.generate_exam(count=max(1, min(20, req.count)), student_id=req.student_id)
         data["questions"] = _sanitize_questions(data.get("questions", []))
@@ -208,8 +249,23 @@ async def examiner_route(req: ExaminerReq):
     """
     Генерация персональных тестов по последнему "срезу" Куратора.
     Гарантирует заполненные поля (text/options/answer).
+
+    Если оркестратор заранее подготовил экзамен для данного student_id,
+    то сначала пытаемся отдать его (и только если его нет — генерируем новый).
     """
-    data = examiner.generate_exam(count=max(1, min(20, req.count)), student_id=req.student_id)
+    # сначала пробуем взять предгенерированный экзамен
+    prepared = None
+    try:
+        prepared = examiner.pop_prepared_exam(req.student_id)  # type: ignore[attr-defined]
+    except Exception as e:
+        print(f"[agents.examiner_route] pop_prepared_exam failed: {e}")
+        prepared = None
+
+    if prepared is not None:
+        data = prepared
+    else:
+        data = examiner.generate_exam(count=max(1, min(20, req.count)), student_id=req.student_id)
+
     questions = _sanitize_questions(data.get("questions", []))
     return {
         "ok": True,

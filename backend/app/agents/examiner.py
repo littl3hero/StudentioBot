@@ -224,3 +224,30 @@ def generate_exam(count: int = 5, student_id: str = "default") -> Dict[str, Any]
     # --- 4. Fallback всегда непустой и валидный ---
     qs = _fallback_questions(topics, weaknesses, count)
     return {"ok": True, "questions": qs, "rubric": "1 балл за верный ответ. Генерация без LLM."}
+
+
+# ===== Предподготовленные экзамены (используются оркестратором) =====
+_PREPARED_EXAMS: Dict[str, Dict[str, Any]] = {}
+
+
+def set_prepared_exam(student_id: str, exam_data: Dict[str, Any]) -> None:
+    """
+    Сохраняем предгенерированный экзамен для студента.
+    Оркестратор может вызвать generate_exam заранее, а затем страница /tests заберёт уже готовые вопросы.
+    """
+    try:
+        _PREPARED_EXAMS[student_id] = exam_data
+    except Exception as e:
+        print(f"[examiner] set_prepared_exam failed: {e}")
+
+
+def pop_prepared_exam(student_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Забираем и удаляем предгенерированный экзамен (если он есть).
+    Если нет — возвращаем None, и вызывающий код может сгенерировать тест обычным способом.
+    """
+    try:
+        return _PREPARED_EXAMS.pop(student_id, None)
+    except Exception as e:
+        print(f"[examiner] pop_prepared_exam failed: {e}")
+        return None

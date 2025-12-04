@@ -18,6 +18,23 @@ type ChatMsg = {
     content: string;
 };
 
+type PlanStepType = 'exam' | 'materials' | 'chat' | 'other';
+
+type PlanStep = {
+    id: string;
+    type: PlanStepType;
+    title: string;
+    description: string;
+    meta?: Record<string, any>;
+    status: 'prepared' | 'pending' | 'error';
+};
+
+type OrchestratorBlock = {
+    instruction_message: string;
+    plan_steps: PlanStep[];
+    auto_route?: string; // <- добавили
+};
+
 type CuratorFromChatRequest = {
     student_id: string;
     level: 'beginner' | 'intermediate' | 'advanced';
@@ -40,6 +57,7 @@ type CuratorFromChatResponse = {
         notes?: string;
     };
     exam?: any;
+    orchestrator?: OrchestratorBlock;
 };
 
 /** ===== Вспомогательные функции для SSE ===== */
@@ -107,14 +125,12 @@ async function wakeBackend() {
 
 /** ===== UI главной страницы ===== */
 export default function HomePage() {
-    const router = useRouter();
-
     const [studentId, setStudentId] = useState('default');
     const [level, setLevel] = useState<
         'beginner' | 'intermediate' | 'advanced'
     >('beginner');
     const [topic, setTopic] = useState('');
-
+    const router = useRouter();
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
     const [evaluating, setEvaluating] = useState(false);
@@ -152,10 +168,7 @@ export default function HomePage() {
         setInput('');
         setSending(true);
 
-        setMessages((prev) => [...prev, { role: 'user', content: text }]);
-
-        const userMsg = { role: 'user' as const, content: text };
-
+        const userMsg: ChatMsg = { role: 'user', content: text };
         const topicContext: ChatMsg = {
             role: 'system',
             content: `Контекст для Куратора: текущая тема = "${
@@ -163,46 +176,63 @@ export default function HomePage() {
             }". Отвечай по этой теме.`,
         };
 
+        // История для backend (мы туда topicContext включаем, но в UI его не показываем)
         const history = [...messages, topicContext, userMsg].slice(-20);
 
-        const assistantIndex = history.length;
-        setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
+        // В UI: добавляем сначала пользователя, потом ПУСТОГО ассистента (которого будем дополнять стримом)
+        setMessages((prev) => [
+            ...prev,
+            userMsg,
+            { role: 'assistant', content: '' },
+        ]);
 
         try {
-            // будим backend и запускаем стрим
             await wakeBackend();
             for await (const delta of ssePost(CHAT_ENDPOINT, {
                 messages: history,
             })) {
                 setMessages((prev) => {
+                    if (prev.length === 0) return prev;
                     const copy = [...prev];
-                    const last = copy[assistantIndex] || {
-                        role: 'assistant',
-                        content: '',
+                    const lastIndex = copy.length - 1;
+                    const last = copy[lastIndex];
+
+                    if (last.role !== 'assistant') {
+                        // на всякий случай — если что-то пошло не так с порядком
+                        return prev;
+                    }
+
+                    copy[lastIndex] = {
+                        ...last,
+                        content: (last.content || '') + delta,
                     };
-                    last.content = (last.content || '') + delta;
-                    copy[assistantIndex] = last;
                     return copy;
                 });
             }
         } catch (e) {
             console.error(e);
             setMessages((prev) => {
+                if (prev.length === 0) return prev;
                 const copy = [...prev];
-                const last = copy[assistantIndex] || {
-                    role: 'assistant',
-                    content: '',
+                const lastIndex = copy.length - 1;
+                const last = copy[lastIndex];
+
+                if (last.role !== 'assistant') {
+                    return prev;
+                }
+
+                copy[lastIndex] = {
+                    ...last,
+                    content:
+                        (last.content || '') +
+                        '\n\n[Ошибка сети при получении ответа. Проверь подключение к API (HTTPS) и CORS на backend.]',
                 };
-                last.content =
-                    (last.content || '') +
-                    '\n\n[Ошибка сети при получении ответа. Проверь подключение к API (HTTPS) и CORS на backend.]';
-                copy[assistantIndex] = last;
                 return copy;
             });
         } finally {
             setSending(false);
         }
-    }, [input, messages]);
+    }, [input, messages, topic]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -237,7 +267,7 @@ export default function HomePage() {
                 throw new Error(`curator/from_chat failed: ${res.status}`);
             const data: CuratorFromChatResponse = await res.json();
 
-            // Сохраним «срез профиля» в localStorage — его подберёт /tests
+            // Сохраним «срез профиля» в localStorage — его подберут /tests и /materials
             localStorage.setItem(
                 'studentio_profile',
                 JSON.stringify({
@@ -252,25 +282,50 @@ export default function HomePage() {
                 })
             );
 
-            // Сообщение для пользователя
+            // Базовое резюме от куратора
+            const baseSummary =
+                `Готово! Я оценил твой уровень по теме «${topic}».\n` +
+                `Цель: ${data?.goals || '—'}\n` +
+                `Слабые места: ${data?.errors?.join(', ') || 'не явные'}\n` +
+                `Оценка уровня: ${data?.profile?.level || level}.`;
+
+            // План от оркестратора (главного бота)
+            let orchestratorText = '';
+            if (data?.orchestrator) {
+                const o = data.orchestrator;
+                if (o.instruction_message) {
+                    orchestratorText +=
+                        `\n\nПлан действий от Главного бота:\n` +
+                        o.instruction_message;
+                }
+                if (o.plan_steps && o.plan_steps.length > 0) {
+                    const stepsText = o.plan_steps
+                        .map(
+                            (step, idx) =>
+                                `${idx + 1}) ${step.title}: ${step.description}`
+                        )
+                        .join('\n');
+                    orchestratorText += `\n\nШаги плана:\n${stepsText}`;
+                }
+                if (o.auto_route) {
+                    // o.auto_route сейчас приходит из бэка как "/tests" или "/materials"
+                    router.push(o.auto_route);
+                }
+                // <<< НОВОЕ
+            } else {
+                // Фолбэк, если по какой-то причине оркестратор не сработал
+                orchestratorText +=
+                    '\n\nДальше можешь перейти на вкладки «Тесты» и «Материалы», чтобы потренироваться и закрыть пробелы.';
+            }
+
+            // Сообщение для пользователя в чате куратора
             setMessages((prev) => [
                 ...prev,
                 {
                     role: 'assistant',
-                    content:
-                        `Готово! Я оценил твой уровень по теме «${topic}».\n` +
-                        `Цель: ${data?.goals || '—'}\n` +
-                        `Слабые места: ${
-                            data?.errors?.join(', ') || 'не явные'
-                        }\n` +
-                        `Оценка уровня: ${data?.profile?.level || level}.\n` +
-                        `Перейди на вкладку «Тесты» — там ждёт персональный тест.`,
+                    content: baseSummary + orchestratorText,
                 },
             ]);
-
-            // Переход на /tests
-            await new Promise((r) => setTimeout(r, 150));
-            router.push('/tests');
         } catch (e) {
             console.error(e);
             alert(
@@ -376,17 +431,18 @@ export default function HomePage() {
                         onClick={handleEvaluateTopic}
                         disabled={evaluating || sending}
                         className="rounded-xl px-4 py-3 bg-white/15 border border-white/10 hover:bg-white/20 disabled:opacity-50"
-                        title="Оценить знания по теме и перейти к тестам"
+                        title="Оценить знания по теме и получить персональный план"
                     >
-                        {evaluating ? 'Оцениваем…' : 'Оценить по теме → Тесты'}
+                        {evaluating ? 'Оцениваем…' : 'Оценить по теме → План'}
                     </button>
                 </div>
             </div>
 
             <footer className="text-xs text-white/50">
                 Подсказка: сначала пообщайся с Куратором по выбранной теме,
-                затем нажми «Оценить по теме». Экзаменатор на странице «Тесты»
-                использует сохранённый профиль.
+                затем нажми «Оценить по теме». Главный бот построит план, а
+                страницы «Тесты» и «Материалы» будут использовать сохранённый
+                профиль.
             </footer>
         </div>
     );

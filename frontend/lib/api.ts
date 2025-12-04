@@ -63,11 +63,14 @@ export async function curatorFromChat(input: {
     return r.json(); // { ok, topic, goals, errors, profile, exam? }
 }
 
-export async function examinerGenerate(count: number) {
+export async function examinerGenerate(
+    count: number,
+    student_id: string = 'default'
+) {
     const r = await fetch(`${API_BASE}/v1/agents/examiner`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count }),
+        body: JSON.stringify({ count, student_id }),
     });
     if (!r.ok) throw new Error(`examiner failed: ${r.status}`);
     return r.json(); // { ok, questions, rubric }
