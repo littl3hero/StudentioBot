@@ -104,17 +104,26 @@ async def assess_student(goals: str, errors: list[str], level: str, student_id: 
     profile_data: dict
     # 3) пробуем LLM; ловим типовые ошибки квоты/сети/JSON-парсинга
     if settings.OPENAI_API_KEY:
+        raw_content = ""  # сюда сохраним сырой ответ модели
         try:
             chat = client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 temperature=0.4,
+                response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": "Ты опытный учебный куратор. Отвечай строго в JSON."},
+                    {
+                        "role": "system",
+                        "content": "Ты опытный учебный куратор. Отвечай строго в JSON.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
             )
-            content = chat.choices[0].message.content or "{}"
-            data = json.loads(content)
+            raw_content = chat.choices[0].message.content or ""
+            # ЛОГИРУЕМ СЫРОЙ ОТВЕТ ВСЕГДА (можно оставить только на время отладки)
+            print(f"[curator] RAW LLM OUTPUT: {repr(raw_content)}")
+
+            # Пытаемся разобрать как JSON
+            data = json.loads(raw_content)
             profile_data = data.get("profile", {})
             # подстрахуем поля
             profile_data.setdefault("level", lvl)
@@ -123,6 +132,7 @@ async def assess_student(goals: str, errors: list[str], level: str, student_id: 
             profile_data.setdefault("topics", [goals] if goals else ["основы предмета"])
             profile_data.setdefault("notes", "")
             profile_data.setdefault("advice", _basic_advice(errs, lvl, goals))
+
         except (RateLimitError, AuthenticationError, APIConnectionError, APIStatusError) as e:
             print(f"[curator] LLM API error: {e}")
             profile_data = {
@@ -134,7 +144,8 @@ async def assess_student(goals: str, errors: list[str], level: str, student_id: 
                 "advice": _basic_advice(errs, lvl, goals),
             }
         except Exception as e:
-            print(f"[curator] LLM parse error: {e}")
+            # ТУТ ТЕПЕРЬ ВИДНО И ОШИБКУ, И СЫРОЙ ТЕКСТ
+            print(f"[curator] LLM parse error: {e}. RAW={repr(raw_content)}")
             profile_data = {
                 "level": lvl,
                 "strengths": [],
@@ -143,6 +154,7 @@ async def assess_student(goals: str, errors: list[str], level: str, student_id: 
                 "notes": "(fallback) ошибка разбора JSON",
                 "advice": _basic_advice(errs, lvl, goals),
             }
+
     else:
         # без ключа — сразу эвристика
         profile_data = {

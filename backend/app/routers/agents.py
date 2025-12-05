@@ -217,10 +217,24 @@ async def curator_from_chat(req: CuratorFromChatRequest):
         student_id=req.student_id,
     )
 
+    # профайл для оркестратора — добавляем goals внутрь
+    profile_for_orchestrator = dict(profile)
+    profile_for_orchestrator.setdefault("goals", [goals] if goals else [])
+
+    # готовим сырые сообщения для оркестратора
+    chat_messages_for_orchestrator = [
+        {"role": m.role, "content": m.content}
+        for m in req.messages[-30:]  # последние 30 сообщений диалога
+    ]
+
     # шаг 3: строим план и дергаем под-агентов
     orchestrator_block = None
     try:
-        orchestrator_block = await orchestrator.plan_and_execute(student_id=req.student_id, profile=profile)
+        orchestrator_block = await orchestrator.plan_and_execute(
+            student_id=req.student_id,
+            profile=profile_for_orchestrator,
+            chat_messages=chat_messages_for_orchestrator,
+        )
     except Exception as e:
         # не ломаем основной ответ из-за ошибок оркестратора
         print(f"[agents.curator_from_chat] orchestrator failed: {e}")
@@ -242,6 +256,7 @@ async def curator_from_chat(req: CuratorFromChatRequest):
         resp["exam"] = data
 
     return resp
+
 
 
 @router.post("/examiner", response_model=ExaminerResp)
@@ -272,6 +287,55 @@ async def examiner_route(req: ExaminerReq):
         "questions": questions,
         "rubric": data.get("rubric", "1 балл за верный ответ."),
     }
+
+class AfterExamRequest(BaseModel):
+    student_id: str = "default"
+    level: Literal["beginner", "intermediate", "advanced"] = "beginner"
+    topic: str = ""
+    ok: int          # сколько правильных
+    total: int       # сколько всего
+
+
+class AfterExamResponse(BaseModel):
+    ok: bool
+    orchestrator: OrchestratorBlock
+
+
+@router.post("/after_exam", response_model=AfterExamResponse)
+async def after_exam(req: AfterExamRequest):
+    """
+    Вызывается после прохождения теста.
+    По результату теста обновляем профиль и снова дергаем Orchestrator,
+    чтобы он решил, что делать дальше: материалы, новый тест или куратор.
+    """
+    # очень простой мэппинг результата → "ошибки" для куратора
+    ratio = req.ok / max(1, req.total)
+    errors: List[str] = []
+
+    if ratio < 0.5:
+        errors.append("плохо справился с тестом по теме")
+    elif ratio < 0.8:
+        errors.append("остались заметные пробелы по теме")
+    else:
+        errors.append("в целом хорошо справился с тестом")
+
+    goals = req.topic or "закрепить текущую тему"
+
+    # обновляем профиль через Куратора (он сам использует память)
+    profile = await curator.assess_student(
+        goals=goals,
+        errors=errors,
+        level=req.level,
+        student_id=req.student_id,
+    )
+
+    # снова запускаем оркестратор: пусть он решает, что дальше
+    orch_block = await orchestrator.plan_and_execute(
+        student_id=req.student_id,
+        profile=profile,
+    )
+
+    return AfterExamResponse(ok=True, orchestrator=orch_block)
 
 
 # ====== ТВОЙ АГЕНТ: МАТЕРИАЛЫ ======

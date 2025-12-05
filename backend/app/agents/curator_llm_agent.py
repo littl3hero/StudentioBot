@@ -6,18 +6,20 @@ from typing import Any, Dict, List, Optional
 from app.deps import settings
 from app.memory.vector_store_pg import get_last_curator_snapshot, fetch_recent_memory
 
+# Пытаемся импортировать новый LangChain-стек
 try:
     from langchain_openai import ChatOpenAI  # type: ignore
-    from langchain.tools import Tool  # type: ignore
-    from langchain.agents import initialize_agent, AgentType  # type: ignore
+    from langchain.tools import tool as lc_tool  # type: ignore
+    from langchain.agents import create_agent  # type: ignore
+
+    _LC_IMPORT_ERROR: Optional[Exception] = None
+    print("[CuratorAgent] LangChain imports OK")
 except Exception as e:
     ChatOpenAI = None  # type: ignore
-    Tool = None  # type: ignore
-    initialize_agent = None  # type: ignore
-    AgentType = None  # type: ignore
+    lc_tool = None  # type: ignore
+    create_agent = None  # type: ignore
     _LC_IMPORT_ERROR = e
-else:
-    _LC_IMPORT_ERROR = None
+    print(f"[CuratorAgent] LangChain import error: {repr(e)}")
 
 
 def _coerce_list(value: Any) -> List[str]:
@@ -30,24 +32,49 @@ def _coerce_list(value: Any) -> List[str]:
     return [str(value)]
 
 
-def run_curator_agent(student_id: str, profile: Dict[str, Any], task: str = "") -> Dict[str, Any]:
+def _fallback_curator(student_id: str, profile: Dict[str, Any], reason: str) -> Dict[str, Any]:
     """
-    CuratorAgent: отдельный LangChain-агент, который анализирует профиль и память студента
-    и возвращает резюме + приоритетные темы.
+    Фолбэк-режим без LangChain:
+    просто используем базовый профиль.
+    """
+    print(f"[CuratorAgent] using fallback curator, reason={reason}")
+    topics = _coerce_list(profile.get("topics"))
+    weaknesses = _coerce_list(profile.get("weaknesses"))
+    return {
+        "summary": (
+            "Дополнительный анализ недоступен, использую базовый профиль. "
+            f"Темы: {', '.join(topics) if topics else '—'}. "
+            f"Слабые места: {', '.join(weaknesses) if weaknesses else 'не явные'}."
+        ),
+        "recommended_topics": topics,
+        "notes": "",
+    }
+
+
+def run_curator_agent(
+    student_id: str,
+    profile: Dict[str, Any],
+    task: str = "",
+) -> Dict[str, Any]:
+    """
+    CuratorAgent: отдельный агент-Куратор.
+    Анализирует профиль и память студента и возвращает:
+    - summary: краткое описание,
+    - recommended_topics: приоритетные темы,
+    - notes: доп. замечания.
     """
     # Фолбэк, если нет LLM/LangChain
-    if not settings.OPENAI_API_KEY or ChatOpenAI is None or initialize_agent is None or AgentType is None or Tool is None:
-        topics = _coerce_list(profile.get("topics"))
-        weaknesses = _coerce_list(profile.get("weaknesses"))
-        return {
-            "summary": (
-                "Дополнительный анализ недоступен (нет LLM), использую базовый профиль. "
-                f"Темы: {', '.join(topics) if topics else '—'}. "
-                f"Слабые места: {', '.join(weaknesses) if weaknesses else 'не явные'}."
-            ),
-            "recommended_topics": topics,
-            "notes": "",
-        }
+    if (
+        not settings.OPENAI_API_KEY
+        or ChatOpenAI is None
+        or lc_tool is None
+        or create_agent is None
+    ):
+        return _fallback_curator(
+            student_id=student_id,
+            profile=profile,
+            reason=f"no-llm-or-langchain (import_error={_LC_IMPORT_ERROR})",
+        )
 
     try:
         try:
@@ -79,54 +106,49 @@ def run_curator_agent(student_id: str, profile: Dict[str, Any], task: str = "") 
             temperature=0.2,
         )
 
-        tools: List[Tool] = []
-
         # tool: получить свежий snapshot при необходимости
-        def _tool_get_snapshot() -> str:
+        @lc_tool
+        def get_student_snapshot() -> str:
+            """
+            get_student_snapshot:
+            Получить последний сохранённый срез профиля студента от Куратора.
+            Возвращает JSON {status, snapshot}.
+            """
             try:
                 snap2 = get_last_curator_snapshot(student_id)
-                return json.dumps({"status": "ok", "snapshot": snap2}, ensure_ascii=False)
+                return json.dumps(
+                    {"status": "ok", "snapshot": snap2}, ensure_ascii=False
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
-
-        tools.append(
-            Tool.from_function(
-                func=_tool_get_snapshot,
-                name="get_student_snapshot",
-                description="Получить последний сохранённый срез профиля студента от Куратора.",
-            )
-        )
+                return json.dumps(
+                    {"status": "error", "error": str(e)}, ensure_ascii=False
+                )
 
         # tool: добрать недавнюю память
-        def _tool_get_recent_memory(limit: int = 5) -> str:
+        @lc_tool
+        def get_recent_memory_tool(limit: int = 5) -> str:
+            """
+            get_recent_memory:
+            Получить несколько последних записей из памяти студента.
+            Возвращает JSON {status, records}.
+            """
             try:
                 recs = fetch_recent_memory(
                     student_id=student_id,
                     kind=None,
                     limit=max(1, min(20, int(limit))),
                 )
-                return json.dumps({"status": "ok", "records": recs}, ensure_ascii=False)
+                return json.dumps(
+                    {"status": "ok", "records": recs}, ensure_ascii=False
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+                return json.dumps(
+                    {"status": "error", "error": str(e)}, ensure_ascii=False
+                )
 
-        tools.append(
-            Tool.from_function(
-                func=_tool_get_recent_memory,
-                name="get_recent_memory",
-                description="Получить несколько последних записей из памяти студента.",
-            )
-        )
+        tools = [get_student_snapshot, get_recent_memory_tool]
 
-        agent = initialize_agent(
-            tools=tools,
-            llm=llm,
-            agent=AgentType.OPENAI_FUNCTIONS,
-            verbose=False,
-            max_iterations=3,
-            handle_parsing_errors=True,
-        )
-
-        instructions = (
+        system_prompt = (
             "Ты — CuratorAgent, специализированный агент-Куратор.\n"
             "У тебя есть профиль студента и доступ к инструментам, которые позволяют посмотреть "
             "последний срез и недавнюю память. На основе этого ты должен:\n"
@@ -137,22 +159,76 @@ def run_curator_agent(student_id: str, profile: Dict[str, Any], task: str = "") 
             '  \"summary\": \"краткое описание сильных и слабых сторон\",\n'
             '  \"recommended_topics\": [\"тема1\", \"тема2\"],\n'
             '  \"notes\": \"любые дополнительные замечания\"\n'
-            "}\n\n"
-            f"Базовые данные профиля:\n{json.dumps(ctx, ensure_ascii=False, indent=2)}\n\n"
+            "}\n"
+        )
+
+        agent = create_agent(model=llm, tools=tools, system_prompt=system_prompt)
+
+        instructions = (
+            "Сделай анализ профиля и памяти студента и верни только JSON в указанном формате.\n\n"
+            "Базовые данные профиля:\n"
+            f"{json.dumps(ctx, ensure_ascii=False, indent=2)}\n\n"
             "Задача от оркестратора:\n"
             f"{task}\n"
         )
 
-        raw = agent.run(instructions)
-        if not isinstance(raw, str):
-            raw = str(raw)
+        print("[CuratorAgent] calling agent.invoke()...")
+        result = agent.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": instructions,
+                    }
+                ]
+            }
+        )
 
-        start = raw.find("{")
-        end = raw.rfind("}")
+        # ----- вынимаем текст из результата -----
+        if isinstance(result, dict) and "messages" in result:
+            msgs = result["messages"] or []
+            last = msgs[-1] if msgs else None
+            if last is not None:
+                content = getattr(last, "content", None)
+            else:
+                content = None
+        else:
+            content = None
+
+        if isinstance(content, str):
+            raw_output = content
+        elif isinstance(content, list):
+            parts: List[str] = []
+            for ch in content:
+                if isinstance(ch, dict) and "text" in ch:
+                    parts.append(str(ch["text"]))
+                else:
+                    parts.append(str(ch))
+            raw_output = "\n".join(parts)
+        else:
+            raw_output = str(result)
+
+        print(
+            "[CuratorAgent] RAW AGENT OUTPUT (first 300 chars): "
+            f"{repr(raw_output)[:300]}"
+        )
+
+        # ----- чистим ```json ... ``` -----
+        cleaned = raw_output.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise ValueError("CuratorAgent: no-json-in-output")
+            raise ValueError(f"CuratorAgent: no-json-in-output: {cleaned[:200]}")
 
-        payload = raw[start : end + 1]
+        payload = cleaned[start : end + 1]
         data = json.loads(payload)
 
         summary = str(data.get("summary") or "").strip()
@@ -171,15 +247,9 @@ def run_curator_agent(student_id: str, profile: Dict[str, Any], task: str = "") 
             "notes": notes,
         }
     except Exception as e:
-        print(f"[CuratorAgent] failed: {e}")
-        topics = _coerce_list(profile.get("topics"))
-        weaknesses = _coerce_list(profile.get("weaknesses"))
-        return {
-            "summary": (
-                "CuratorAgent не смог выполнить анализ, использую базовый профиль. "
-                f"Темы: {', '.join(topics) if topics else '—'}. "
-                f"Слабые места: {', '.join(weaknesses) if weaknesses else 'не явные'}."
-            ),
-            "recommended_topics": topics,
-            "notes": "",
-        }
+        print(f"[CuratorAgent] ERROR in LC-agent: {e}")
+        return _fallback_curator(
+            student_id=student_id,
+            profile=profile,
+            reason=f"lc-agent-error: {e}",
+        )

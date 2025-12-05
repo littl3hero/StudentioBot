@@ -12,19 +12,20 @@ from app.agents import (
     materials_agent,
 )
 
-# Пытаемся импортировать LangChain; если не получится — будет фолбэк-план
+# ==== LangChain: новый API (v1) ====
 try:
     from langchain_openai import ChatOpenAI  # type: ignore
-    from langchain.tools import Tool  # type: ignore
-    from langchain.agents import initialize_agent, AgentType  # type: ignore
+    from langchain.tools import tool as lc_tool  # type: ignore
+    from langchain.agents import create_agent  # type: ignore
 except Exception as e:
     ChatOpenAI = None  # type: ignore
-    Tool = None  # type: ignore
-    initialize_agent = None  # type: ignore
-    AgentType = None  # type: ignore
+    lc_tool = None  # type: ignore
+    create_agent = None  # type: ignore
     _LC_IMPORT_ERROR = e
+    print(f"[orchestrator] LangChain import error: {repr(e)}")
 else:
     _LC_IMPORT_ERROR = None
+    print("[orchestrator] LangChain imports OK")
 
 
 def _normalize_level(value: str) -> str:
@@ -55,6 +56,7 @@ def _fallback_plan(student_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     Простой детерминированный план без LLM / LangChain.
     Не вызывает под-агентов, только выдаёт шаги.
     """
+    print("[orchestrator] Работает fallback_plan (без LangChain)")
     level = _normalize_level(str(profile.get("level") or "beginner"))
     topics = _coerce_list(profile.get("topics"))
     weaknesses = _coerce_list(profile.get("weaknesses"))
@@ -143,23 +145,24 @@ def _fallback_plan(student_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     return {"instruction_message": instruction, "plan_steps": steps}
 
 
-def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
+def _build_tools(student_id: str, profile: Dict[str, Any]) -> List[Any]:
     """
-    Собираем набор инструментов LangChain вокруг отдельных специализированных агентов:
-    - curator_agent      → CuratorAgent (анализ профиля/памяти)
-    - examiner_agent     → ExaminerAgent (подготовка экзаменов)
-    - materials_agent    → MaterialsAgent (генерация материалов)
-    а также несколько вспомогательных инструментов для работы с памятью/материалами.
+    Собираем набор инструментов вокруг отдельных специализированных агентов.
+    Используем декоратор @tool (langchain.tools.tool) БЕЗ name/description.
     """
-    if Tool is None:
+    if lc_tool is None:
+        print("[orchestrator._build_tools] lc_tool is None → tools=[]")
         return []
 
-    tools: List[Tool] = []
+    tools: List[Any] = []
 
-    # --- CuratorAgent: анализирует профиль и память, даёт резюме и приоритетные темы ---
-    def _tool_curator_agent(task: str = "") -> str:
+    # --- CuratorAgent ---
+    @lc_tool
+    def curator_agent(task: str = "") -> str:
         """
-        Вызвать CuratorAgent. Он вернёт summary, recommended_topics, notes.
+        CuratorAgent:
+        Анализирует профиль и недавнюю активность студента и возвращает резюме
+        и список приоритетных тем. Аргумент: task (строка с задачей/вопросом).
         """
         try:
             result = curator_llm_agent.run_curator_agent(
@@ -172,22 +175,15 @@ def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
             err = {"status": "error", "error": str(e)}
             return json.dumps(err, ensure_ascii=False)
 
-    tools.append(
-        Tool.from_function(
-            func=_tool_curator_agent,
-            name="curator_agent",
-            description=(
-                "Обратиться к специализированному CuratorAgent. "
-                "Он анализирует профиль и недавнюю активность студента и возвращает резюме "
-                "и список приоритетных тем. Аргумент: task (строка с задачей/вопросом)."
-            ),
-        )
-    )
+    tools.append(curator_agent)
 
-    # --- ExaminerAgent: готовит и сохраняет экзамен для студента ---
-    def _tool_examiner_agent(count: int = 5, topic_hint: Optional[str] = None) -> str:
+    # --- ExaminerAgent ---
+    @lc_tool
+    def examiner_agent(count: int = 5, topic_hint: Optional[str] = None) -> str:
         """
-        Вызвать ExaminerAgent. Он подготовит персональный экзамен и сохранит его.
+        ExaminerAgent:
+        Генерирует персональный тренировочный тест и сохраняет его для страницы «Тесты».
+        Аргументы: count (1–20), topic_hint — тема/подтема, на которой сделать акцент.
         """
         try:
             result = examiner_llm_agent.run_examiner_agent(
@@ -201,26 +197,18 @@ def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
             err = {"status": "error", "error": str(e)}
             return json.dumps(err, ensure_ascii=False)
 
-    tools.append(
-        Tool.from_function(
-            func=_tool_examiner_agent,
-            name="examiner_agent",
-            description=(
-                "Обратиться к специализированному ExaminerAgent. "
-                "Он генерирует персональный тренировочный тест и сохраняет его для страницы «Тесты». "
-                "Аргументы: count (int, 1–20) — желаемое число вопросов, "
-                "topic_hint (строка) — тема/подтема, на которой сделать акцент."
-            ),
-        )
-    )
+    tools.append(examiner_agent)
 
-    # --- MaterialsAgent: генерирует и сохраняет учебные материалы ---
-    def _tool_materials_agent(
+    # --- MaterialsAgent ---
+    @lc_tool
+    def materials_agent_tool(
         focus_topics: Optional[List[str]] = None,
         weaknesses: Optional[List[str]] = None,
     ) -> str:
         """
-        Вызвать MaterialsAgent. Он создаёт и сохраняет материалы.
+        MaterialsAgent:
+        Создаёт и сохраняет конспекты, шпаргалки и ссылки по темам студента.
+        Аргументы: focus_topics (список тем), weaknesses (список слабых мест).
         """
         try:
             result = materials_llm_agent.run_materials_agent(
@@ -234,23 +222,15 @@ def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
             err = {"status": "error", "error": str(e)}
             return json.dumps(err, ensure_ascii=False)
 
-    tools.append(
-        Tool.from_function(
-            func=_tool_materials_agent,
-            name="materials_agent",
-            description=(
-                "Обратиться к специализированному MaterialsAgent. "
-                "Он создаёт и сохраняет конспекты, шпаргалки и ссылки по темам студента. "
-                "Аргументы: focus_topics (список тем) и weaknesses (список слабых мест)."
-            ),
-        )
-    )
+    tools.append(materials_agent_tool)
 
-    # --- Вспомогательные инструменты работы с памятью/материалами (сенсоры) ---
-
-    def _tool_get_materials_summary(limit: int = 5) -> str:
+    # --- Сенсор: краткий список материалов ---
+    @lc_tool
+    def get_materials_summary(limit: int = 5) -> str:
         """
-        Вернуть краткое описание уже существующих материалов студента.
+        get_materials_summary:
+        Возвращает краткий список уже существующих материалов (id, title, type)
+        для текущего студента. Ограничение по числу элементов — limit (1–20).
         """
         try:
             mats = materials_agent.get_materials_for_student(student_id=student_id)
@@ -270,20 +250,15 @@ def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
             err = {"status": "error", "error": str(e)}
             return json.dumps(err, ensure_ascii=False)
 
-    tools.append(
-        Tool.from_function(
-            func=_tool_get_materials_summary,
-            name="get_materials_summary",
-            description=(
-                "Получить краткий список уже существующих материалов для студента "
-                "(заголовок, тип). Полезно, чтобы не генерировать лишнее."
-            ),
-        )
-    )
+    tools.append(get_materials_summary)
 
-    def _tool_get_student_profile() -> str:
+    # --- Сенсор: последний срез профиля ---
+    @lc_tool
+    def get_student_profile() -> str:
         """
-        Вернуть последний сохранённый срез куратора из памяти.
+        get_student_profile:
+        Возвращает последний сохранённый срез куратора (профиль студента)
+        из долговременной памяти.
         """
         try:
             snap = get_last_curator_snapshot(student_id)
@@ -292,20 +267,15 @@ def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
             err = {"status": "error", "error": str(e)}
             return json.dumps(err, ensure_ascii=False)
 
-    tools.append(
-        Tool.from_function(
-            func=_tool_get_student_profile,
-            name="get_student_profile",
-            description=(
-                "Получить последний сохранённый срез куратора (профиль студента) "
-                "из долговременной памяти."
-            ),
-        )
-    )
+    tools.append(get_student_profile)
 
-    def _tool_get_recent_memory(limit: int = 5) -> str:
+    # --- Сенсор: свежая память ---
+    @lc_tool
+    def get_recent_memory(limit: int = 5) -> str:
         """
-        Вернуть несколько последних записей из памяти студента.
+        get_recent_memory:
+        Возвращает несколько последних записей из памяти студента
+        (его ответы, заметки, предыдущие объяснения и т.п.).
         """
         try:
             recs = fetch_recent_memory(
@@ -318,29 +288,25 @@ def _build_tools(student_id: str, profile: Dict[str, Any]) -> List["Tool"]:
             err = {"status": "error", "error": str(e)}
             return json.dumps(err, ensure_ascii=False)
 
-    tools.append(
-        Tool.from_function(
-            func=_tool_get_recent_memory,
-            name="get_recent_memory",
-            description=(
-                "Получить несколько последних записей из памяти студента "
-                "(например, его ответы, заметки, предыдущие объяснения)."
-            ),
-        )
-    )
+    tools.append(get_recent_memory)
 
     return tools
 
 
-def _agent_plan(student_id: str, profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _agent_plan(
+    student_id: str,
+    profile: Dict[str, Any],
+    chat_messages: Optional[List[Dict[str, str]]] = None,
+) -> Optional[Dict[str, Any]]:
     """
-    Построение плана через настоящего LangChain-агента с tools.
-    При любой ошибке возвращает None, чтобы наверху сработал фолбэк.
+    Строим план через LangChain-агента (новый API create_agent).
+    При любой ошибке возвращаем None → сверху сработает fallback.
     """
     if not settings.OPENAI_API_KEY:
+        print("[orchestrator._agent_plan] OPENAI_API_KEY is empty → None")
         return None
-    if ChatOpenAI is None or initialize_agent is None or AgentType is None or Tool is None:
-        # LangChain или langchain-openai недоступны
+    if ChatOpenAI is None or lc_tool is None or create_agent is None:
+        print(f"[orchestrator._agent_plan] LangChain not available, import_error={_LC_IMPORT_ERROR}")
         return None
 
     try:
@@ -351,7 +317,6 @@ def _agent_plan(student_id: str, profile: Dict[str, Any]) -> Optional[Dict[str, 
             profile.get("goals") or profile.get("target") or profile.get("targets")
         )
 
-        # немного контекста из памяти/среза
         try:
             snap = get_last_curator_snapshot(student_id)
         except Exception as e:
@@ -377,6 +342,7 @@ def _agent_plan(student_id: str, profile: Dict[str, Any]) -> Optional[Dict[str, 
             "raw_profile": profile,
             "last_curator_snapshot": snap,
             "recent_memory": recent,
+            "chat_messages": chat_messages or [],  # ← добавили
         }
 
         model_name = getattr(settings, "ORCHESTRATOR_MODEL", None) or getattr(
@@ -391,43 +357,27 @@ def _agent_plan(student_id: str, profile: Dict[str, Any]) -> Optional[Dict[str, 
 
         tools = _build_tools(student_id, profile)
 
-        max_steps = getattr(settings, "ORCHESTRATOR_MAX_STEPS", 4)
-        try:
-            max_steps_int = int(max_steps)
-        except Exception:
-            max_steps_int = 4
-
-        agent = initialize_agent(
-            tools=tools,
-            llm=llm,
-            agent=AgentType.OPENAI_FUNCTIONS,
-            verbose=False,
-            max_iterations=max_steps_int,
-            handle_parsing_errors=True,
-        )
-
-        # Инструкция агенту: что делать и в каком формате вернуть финальный ответ
-        instructions = (
+        # system_prompt — общая инструкция агенту
+        system_prompt = (
             "Ты — главный учебный координатор (оркестратор) для студента.\n"
             "У тебя есть профиль ученика и несколько специализированных агентов, "
             "с которыми ты можешь общаться через инструменты (tools):\n"
-            "- curator_agent      → CuratorAgent, анализирует профиль и память;\n"
-            "- examiner_agent     → ExaminerAgent, готовит персональные тесты;\n"
-            "- materials_agent    → MaterialsAgent, создаёт учебные материалы;\n"
-            "а также вспомогательные инструменты get_materials_summary, get_student_profile, get_recent_memory.\n\n"
-            "Твои задачи:\n"
-            "1) Проанализировать уровень, цели, темы и слабые места студента.\n"
-            "2) При необходимости обратиться к специализированным агентам через соответствующие tools.\n"
-            "3) Составить понятный и не слишком длинный план из 2–4 шагов, который использует разделы интерфейса:\n"
-            "   - вкладка «Тесты» (экзаменатор),\n"
-            "   - раздел «Материалы»,\n"
-            "   - при желании — возвращение к Куратору (чат).\n\n"
-            "Ограничения:\n"
-            "- Не делай больше нескольких вызовов инструментов — только когда они реально помогают плану.\n"
-            "- Обязательно включи хотя бы один шаг с type=\"exam\" или type=\"materials\".\n"
-            "- Всего шагов в плане должно быть не более 4.\n\n"
-            "Финальный ответ:\n"
-            "- В качестве финального ответа ты ДОЛЖЕН вывести ТОЛЬКО JSON без пояснений вокруг, в формате:\n"
+            "- curator_agent      → анализирует профиль и память;\n"
+            "- examiner_agent     → готовит персональные тесты;\n"
+            "- materials_agent    → создаёт учебные материалы;\n"
+            "а также вспомогательные инструменты get_materials_summary, "
+            "get_student_profile, get_recent_memory.\n\n"
+            "Твоя задача — построить учебный план из 2–4 шагов.\n"
+            "Финальный ответ ДОЛЖЕН быть строго в формате JSON (см. далее)."
+        )
+
+        # создаём агента нового типа
+        agent = create_agent(llm, tools=tools, system_prompt=system_prompt)
+
+        # Пользовательское сообщение с форматом JSON и данными профиля
+        instructions = (
+            "Составь учебный план.\n\n"
+            "Формат ответа (строго JSON, без пояснений вокруг):\n"
             "{\n"
             '  \"instruction_message\": \"краткий понятный текст-пояснение студенту, что он будет делать дальше\",\n'
             "  \"plan_steps\": [\n"
@@ -441,32 +391,73 @@ def _agent_plan(student_id: str, profile: Dict[str, Any]) -> Optional[Dict[str, 
             "    }\n"
             "  ]\n"
             "}\n\n"
-            "Где:\n"
-            "- type отражает раздел интерфейса (exam = «Тесты», materials = «Материалы», chat = вернуться к Куратору).\n"
-            "- Если ты вызывал инструменты для подготовки теста/материалов, проставь status=\"prepared\" и добавь в meta краткую сводку.\n"
-            "- Если инструмент завершился с ошибкой — status=\"error\" и meta.error с кратким описанием.\n\n"
-            "Теперь внимательно изучи данные ниже и при необходимости используй инструменты. "
-            "После этого верни только итоговый JSON-план в указанном формате.\n\n"
-            f"Данные профиля студента:\n{json.dumps(ctx, ensure_ascii=False, indent=2)}\n"
+            "Данные профиля студента:\n"
+            f"{json.dumps(ctx, ensure_ascii=False, indent=2)}\n"
         )
 
-        raw_output = agent.run(instructions)
-        if not isinstance(raw_output, str):
-            raw_output = str(raw_output)
+        print("[orchestrator._agent_plan] calling agent.invoke()...")
+        result = agent.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": instructions,
+                    }
+                ]
+            }
+        )
 
-        # Вырезаем JSON из ответа (на случай, если модель что-то добавила вокруг)
-        start = raw_output.find("{")
-        end = raw_output.rfind("}")
+        # В новом API результат — словарь с 'messages'
+        if isinstance(result, dict) and "messages" in result:
+            msgs = result["messages"] or []
+            last = msgs[-1] if msgs else None
+            if last is not None:
+                content = getattr(last, "content", None)
+            else:
+                content = None
+        else:
+            content = None
+
+        if isinstance(content, str):
+            raw_output = content
+        elif isinstance(content, list):
+            # может вернуться список блоков {type: "text", text: "..."}
+            parts: List[str] = []
+            for ch in content:
+                if isinstance(ch, dict) and "text" in ch:
+                    parts.append(str(ch["text"]))
+                else:
+                    parts.append(str(ch))
+            raw_output = "\n".join(parts)
+        else:
+            raw_output = str(result)
+
+        print(
+            "[orchestrator._agent_plan] RAW AGENT OUTPUT (first 300 chars): "
+            f"{repr(raw_output)[:300]}"
+        )
+
+        # --- очистка от ```json ... ```
+        cleaned = raw_output.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise ValueError("no-json-in-agent-output")
+            raise ValueError(f"no-json-in-agent-output: {cleaned[:200]}")
 
-        payload = raw_output[start : end + 1]
+        payload = cleaned[start : end + 1]
         data = json.loads(payload)
 
         if "instruction_message" not in data or "plan_steps" not in data:
             raise ValueError("bad-agent-json-structure")
 
-        # Нормализуем список шагов
         steps_raw = data.get("plan_steps") or []
         steps: List[Dict[str, Any]] = []
         for idx, step in enumerate(steps_raw):
@@ -499,12 +490,17 @@ def _agent_plan(student_id: str, profile: Dict[str, Any]) -> Optional[Dict[str, 
             "instruction_message": str(data.get("instruction_message") or "").strip(),
             "plan_steps": steps,
         }
+
     except Exception as e:
-        print(f"[orchestrator] agent planning failed: {e}")
+        print(f"[orchestrator._agent_plan] ERROR: {e}")
         return None
 
 
-async def plan_and_execute(student_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+async def plan_and_execute(
+    student_id: str,
+    profile: Dict[str, Any],
+    chat_messages: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
     """
     Главная функция оркестратора.
 
@@ -514,7 +510,7 @@ async def plan_and_execute(student_id: str, profile: Dict[str, Any]) -> Dict[str
     4) ЯВНО указывает, к какому агенту и на какой route фронту имеет смысл
        автоматически перевести пользователя (next_agent, auto_route, primary_step_id).
     """
-    plan = _agent_plan(student_id, profile)
+    plan = _agent_plan(student_id, profile, chat_messages=chat_messages)
     if plan is None:
         plan = _fallback_plan(student_id, profile)
 
@@ -553,38 +549,48 @@ async def plan_and_execute(student_id: str, profile: Dict[str, Any]) -> Dict[str
             }
         )
 
-    # --- Определяем «главный» шаг и следующего агента/route ---
-
+    # --- дальше твоя логика выбора primary_step / next_agent / auto_route как у тебя написано ---
     primary_step: Optional[Dict[str, Any]] = None
     for step in normalized_steps:
-        # Не берём шаги с ошибкой
         if step.get("status") == "error":
             continue
-        # Интересны только реальные агенты: экзаменатор, материалы или чат
         if step.get("type") in {"exam", "materials", "chat"}:
             primary_step = step
             break
 
-    next_agent = "none"
-    auto_route: Optional[str] = None
+    raw_next_agent = str(plan.get("next_agent") or "").strip().lower()
+    if raw_next_agent not in {"examiner", "materials", "curator", "none"}:
+        raw_next_agent = "none"
+
+    raw_auto_route = plan.get("auto_route")
+    if isinstance(raw_auto_route, str):
+        raw_auto_route = raw_auto_route.strip() or None
+    else:
+        raw_auto_route = None
+
+    next_agent = raw_next_agent or "none"
+    auto_route: Optional[str] = raw_auto_route
     primary_step_id: Optional[str] = None
 
     if primary_step is not None:
         primary_step_id = str(primary_step.get("id"))
         stype = primary_step.get("type")
 
-        if stype == "exam":
-            # Главным агентом становится Exam и фронт может сразу открыть /tests
-            next_agent = "examiner"
-            auto_route = "/tests"
-        elif stype == "materials":
-            # Главный агент — материалы → можно открыть /materials
-            next_agent = "materials"
-            auto_route = "/materials"
-        elif stype == "chat":
-            # Остаёмся в кураторе (страница чата)
-            next_agent = "curator"
-            auto_route = None
+        if next_agent == "none":
+            if stype == "exam":
+                next_agent = "examiner"
+            elif stype == "materials":
+                next_agent = "materials"
+            elif stype == "chat":
+                next_agent = "curator"
+
+        if auto_route is None:
+            if stype == "exam":
+                auto_route = "/tests"
+            elif stype == "materials":
+                auto_route = "/materials"
+            elif stype == "chat":
+                auto_route = None
 
     return {
         "instruction_message": instruction,
@@ -593,3 +599,4 @@ async def plan_and_execute(student_id: str, profile: Dict[str, Any]) -> Dict[str
         "auto_route": auto_route,
         "primary_step_id": primary_step_id,
     }
+

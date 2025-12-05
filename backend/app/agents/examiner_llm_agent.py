@@ -6,18 +6,20 @@ from typing import Any, Dict, List, Optional
 from app.deps import settings
 from app.agents import examiner
 
+# Пытаемся импортировать новый LangChain-стек
 try:
     from langchain_openai import ChatOpenAI  # type: ignore
-    from langchain.tools import Tool  # type: ignore
-    from langchain.agents import initialize_agent, AgentType  # type: ignore
+    from langchain.tools import tool as lc_tool  # type: ignore
+    from langchain.agents import create_agent  # type: ignore
+
+    _LC_IMPORT_ERROR: Optional[Exception] = None
+    print("[ExaminerAgent] LangChain imports OK")
 except Exception as e:
     ChatOpenAI = None  # type: ignore
-    Tool = None  # type: ignore
-    initialize_agent = None  # type: ignore
-    AgentType = None  # type: ignore
+    lc_tool = None  # type: ignore
+    create_agent = None  # type: ignore
     _LC_IMPORT_ERROR = e
-else:
-    _LC_IMPORT_ERROR = None
+    print(f"[ExaminerAgent] LangChain import error: {repr(e)}")
 
 
 def _coerce_list(value: Any) -> List[str]:
@@ -30,6 +32,43 @@ def _coerce_list(value: Any) -> List[str]:
     return [str(value)]
 
 
+def _fallback_exam(
+    student_id: str,
+    safe_count: int,
+    topic_hint: Optional[str],
+    reason: str,
+) -> Dict[str, Any]:
+    """
+    Фолбэк-режим без LangChain:
+    просто генерируем экзамен и сохраняем через examiner.
+    """
+    print(f"[ExaminerAgent] using fallback exam generation, reason={reason}")
+    try:
+        data = examiner.generate_exam(count=safe_count, student_id=student_id)
+
+        # пытаемся сохранить предгенерированный экзамен
+        try:
+            examiner.set_prepared_exam(student_id, data)  # type: ignore[attr-defined]
+        except Exception as e:
+            print(f"[ExaminerAgent] fallback set_prepared_exam failed: {e}")
+
+        questions = data.get("questions") or []
+        return {
+            "status": "ok",
+            "questions_prepared": len(questions),
+            "topic_hint": topic_hint,
+            "comment": "Экзамен подготовлен в режиме фолбэка. Перейди на страницу «Тесты», чтобы его пройти.",
+        }
+    except Exception as e:
+        print(f"[ExaminerAgent] fallback generate_exam failed: {e}")
+        return {
+            "status": "error",
+            "questions_prepared": 0,
+            "topic_hint": topic_hint,
+            "comment": f"Не удалось подготовить экзамен: {e}",
+        }
+
+
 def run_examiner_agent(
     student_id: str,
     profile: Dict[str, Any],
@@ -37,8 +76,14 @@ def run_examiner_agent(
     topic_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    ExaminerAgent: отдельный LangChain-агент, который решает, какой экзамен подготовить,
-    вызывает базовый генератор экзамена и возвращает сводку.
+    ExaminerAgent: отдельный агент-Экзаменатор.
+
+    Режимы:
+    - Если LangChain/LLM недоступны → простой фолбэк: generate_exam + set_prepared_exam.
+    - Если доступны → агент с tool generate_exam_for_student:
+        * решает, какой экзамен подготовить (кол-во вопросов, тема),
+        * вызывает tool (который реально вызывает examiner.generate_exam),
+        * возвращает JSON со сводкой: status / questions_prepared / topic_hint / comment.
     """
     # защита от странных значений
     try:
@@ -49,28 +94,21 @@ def run_examiner_agent(
     topics = _coerce_list(profile.get("topics"))
     default_topic_hint = topic_hint or (topics[0] if topics else None)
 
-    # Фолбэк, если нет LLM/LangChain
-    if not settings.OPENAI_API_KEY or ChatOpenAI is None or initialize_agent is None or AgentType is None or Tool is None:
-        try:
-            data = examiner.generate_exam(count=safe_count, student_id=student_id)
-            try:
-                examiner.set_prepared_exam(student_id, data)  # type: ignore[attr-defined]
-            except Exception as e:
-                print(f"[ExaminerAgent] fallback set_prepared_exam failed: {e}")
-            questions = data.get("questions") or []
-            return {
-                "status": "ok",
-                "questions_prepared": len(questions),
-                "topic_hint": default_topic_hint,
-                "comment": "Экзамен подготовлен в режиме фолбэка без полноценного ExamineAgent.",
-            }
-        except Exception as e:
-            return {
-                "status": "error",
-                "questions_prepared": 0,
-                "topic_hint": default_topic_hint,
-                "comment": f"Не удалось подготовить экзамен: {e}",
-            }
+    # --- ФОЛБЭК, если нет ключа или нет LangChain ---
+    if (
+        not settings.OPENAI_API_KEY
+        or ChatOpenAI is None
+        or lc_tool is None
+        or create_agent is None
+    ):
+        return _fallback_exam(
+            student_id=student_id,
+            safe_count=safe_count,
+            topic_hint=default_topic_hint,
+            reason=f"no-llm-or-langchain (import_error={_LC_IMPORT_ERROR})",
+        )
+
+    # --- Основной путь: LangChain-агент с одним tool ---
 
     try:
         llm = ChatOpenAI(
@@ -79,20 +117,32 @@ def run_examiner_agent(
             temperature=0.2,
         )
 
-        tools: List[Tool] = []
+        # tool, который реально вызывает examiner.generate_exam и сохраняет экзамен
+        @lc_tool
+        def generate_exam_for_student(
+            count: int = safe_count,
+            topic_hint: Optional[str] = default_topic_hint,
+        ) -> str:
+            """
+            generate_exam_for_student:
+            Сгенерировать и сохранить тренировочный тест для текущего студента.
+            Аргументы: count (1–20) и topic_hint (строка с темой/подтемой).
+            Возвращает JSON: {status, questions_prepared, topic_hint}.
+            """
+            try:
+                try:
+                    safe_c = max(1, min(20, int(count)))
+                except Exception:
+                    safe_c = safe_count
 
-        # tool: базовая генерация экзамена
-        def _tool_generate_exam(count: int = safe_count, topic_hint: Optional[str] = default_topic_hint) -> str:
-            try:
-                safe_c = max(1, min(20, int(count)))
-            except Exception:
-                safe_c = safe_count
-            try:
                 data = examiner.generate_exam(count=safe_c, student_id=student_id)
+
+                # сохраняем предгенерированный экзамен
                 try:
                     examiner.set_prepared_exam(student_id, data)  # type: ignore[attr-defined]
                 except Exception as e:
                     print(f"[ExaminerAgent] set_prepared_exam failed: {e}")
+
                 questions = data.get("questions") or []
                 summary = {
                     "status": "ok",
@@ -104,25 +154,7 @@ def run_examiner_agent(
                 err = {"status": "error", "error": str(e)}
                 return json.dumps(err, ensure_ascii=False)
 
-        tools.append(
-            Tool.from_function(
-                func=_tool_generate_exam,
-                name="generate_exam_for_student",
-                description=(
-                    "Сгенерировать и сохранить тренировочный тест для текущего студента. "
-                    "Аргументы: count (1–20) и topic_hint (строка с темой/подтемой)."
-                ),
-            )
-        )
-
-        agent = initialize_agent(
-            tools=tools,
-            llm=llm,
-            agent=AgentType.OPENAI_FUNCTIONS,
-            verbose=False,
-            max_iterations=2,
-            handle_parsing_errors=True,
-        )
+        tools = [generate_exam_for_student]
 
         ctx = {
             "student_id": student_id,
@@ -131,9 +163,10 @@ def run_examiner_agent(
             "requested_topic_hint": default_topic_hint,
         }
 
-        instructions = (
+        system_prompt = (
             "Ты — ExaminerAgent, специализированный агент-Экзаменатор.\n"
-            "У тебя есть профиль студента и tool generate_exam_for_student, который реально создаёт и сохраняет тест.\n"
+            "У тебя есть профиль студента и инструмент generate_exam_for_student, "
+            "который реально создаёт и сохраняет тест.\n\n"
             "Твоя задача — подготовить разумный тренировочный экзамен по нужной теме/темам.\n\n"
             "Требования:\n"
             "- Вызови generate_exam_for_student РОВНО ОДИН раз.\n"
@@ -144,53 +177,102 @@ def run_examiner_agent(
             '  \"questions_prepared\": 5,\n'
             '  \"topic_hint\": \"строка с темой\",\n'
             '  \"comment\": \"краткое пояснение, какой тест подготовлен\"\n'
-            "}\n\n"
-            f"Данные студента:\n{json.dumps(ctx, ensure_ascii=False, indent=2)}\n"
+            "}\n"
         )
 
-        raw = agent.run(instructions)
-        if not isinstance(raw, str):
-            raw = str(raw)
+        agent = create_agent(model=llm, tools=tools, system_prompt=system_prompt)
 
-        start = raw.find("{")
-        end = raw.rfind("}")
+        instructions = (
+            "Подготовь экзамен для студента и верни только JSON в указанном формате.\n\n"
+            "Данные студента:\n"
+            f"{json.dumps(ctx, ensure_ascii=False, indent=2)}\n"
+        )
+
+        print("[ExaminerAgent] calling agent.invoke()...")
+        result = agent.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": instructions,
+                    }
+                ]
+            }
+        )
+
+        # ----- Вынимаем текст из результата -----
+
+        if isinstance(result, dict) and "messages" in result:
+            msgs = result["messages"] or []
+            last = msgs[-1] if msgs else None
+            if last is not None:
+                content = getattr(last, "content", None)
+            else:
+                content = None
+        else:
+            content = None
+
+        if isinstance(content, str):
+            raw_output = content
+        elif isinstance(content, list):
+            parts: List[str] = []
+            for ch in content:
+                if isinstance(ch, dict) and "text" in ch:
+                    parts.append(str(ch["text"]))
+                else:
+                    parts.append(str(ch))
+            raw_output = "\n".join(parts)
+        else:
+            raw_output = str(result)
+
+        print(
+            "[ExaminerAgent] RAW AGENT OUTPUT (first 300 chars): "
+            f"{repr(raw_output)[:300]}"
+        )
+
+        # ----- Чистим обёртку ```json ... ``` -----
+
+        cleaned = raw_output.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise ValueError("ExaminerAgent: no-json-in-output")
+            raise ValueError(f"ExaminerAgent: no-json-in-output: {cleaned[:200]}")
 
-        payload = raw[start : end + 1]
+        payload = cleaned[start : end + 1]
         data = json.loads(payload)
 
         status = str(data.get("status") or "ok")
-        qp = int(data.get("questions_prepared") or 0)
+        try:
+            qp = int(data.get("questions_prepared") or 0)
+        except Exception:
+            qp = 0
         th = data.get("topic_hint") or default_topic_hint
         comment = str(data.get("comment") or "").strip()
+
+        if not comment:
+            comment = "Экзамен подготовлен. Перейди на страницу «Тесты», чтобы его пройти."
 
         return {
             "status": status,
             "questions_prepared": qp,
             "topic_hint": th,
-            "comment": comment
-            or "Экзамен подготовлен. Перейди на страницу «Тесты», чтобы его пройти.",
+            "comment": comment,
         }
+
     except Exception as e:
-        print(f"[ExaminerAgent] failed: {e}")
-        try:
-            data = examiner.generate_exam(count=safe_count, student_id=student_id)
-            try:
-                examiner.set_prepared_exam(student_id, data)  # type: ignore[attr-defined]
-            except Exception as e2:
-                print(f"[ExaminerAgent] fallback set_prepared_exam failed: {e2}")
-            questions = data.get("questions") or []
-            return {
-                "status": "ok",
-                "questions_prepared": len(questions),
-                "topic_hint": default_topic_hint,
-                "comment": "ExaminerAgent не сработал, тест подготовлен напрямую.",
-            }
-        except Exception as e2:
-            return {
-                "status": "error",
-                "questions_prepared": 0,
-                "topic_hint": default_topic_hint,
-                "comment": f"Не удалось подготовить экзамен: {e2}",
-            }
+        print(f"[ExaminerAgent] ERROR in LC-agent: {e}")
+        # если агент сломался — честно валимся в фолбэк
+        return _fallback_exam(
+            student_id=student_id,
+            safe_count=safe_count,
+            topic_hint=default_topic_hint,
+            reason=f"lc-agent-error: {e}",
+        )
