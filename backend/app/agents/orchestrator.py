@@ -327,7 +327,7 @@ def _agent_plan(
             recent = fetch_recent_memory(
                 student_id=student_id,
                 kind=None,
-                limit=5,
+                limit=8,
             )
         except Exception as e:
             print(f"[orchestrator] fetch_recent_memory failed: {e}")

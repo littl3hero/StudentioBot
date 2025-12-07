@@ -11,6 +11,9 @@ from pydantic import BaseModel
 from app.deps import settings
 from app.agents import curator, examiner, materials_agent, orchestrator  # ← добавлен materials_agent и orchestrator
 
+from app.memory.vector_store_pg import save_memory
+
+
 
 # Опционально используем LLM для извлечения goals/errors из диалога (с фолбэком)
 try:
@@ -94,6 +97,41 @@ class ExaminerResp(BaseModel):
 
 
 # ====== Утилиты ======
+
+def _save_chat_snapshot(student_id: str, topic: str, messages: list[dict]) -> None:
+    """
+    Сохраняем кусок диалога (последние N сообщений) в student_memory
+    для дальнейшего семантического поиска.
+    """
+    # оставим последние 20 сообщений, чтобы не раздувать одну запись
+    tail = messages[-20:]
+
+    lines: list[str] = []
+    for m in tail:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        prefix = {
+            "user": "Ученик",
+            "assistant": "Куратор",
+            "system": "Система",
+        }.get(role, role or "unknown")
+        lines.append(f"{prefix}: {content}")
+
+    if not lines:
+        return
+
+    text = "=== CHAT SNIPPET ===\n" + "\n".join(lines)
+
+    meta = {
+        "kind": "chat",
+        "topic": topic or "",
+        "message_count": len(lines),
+    }
+
+    save_memory(student_id, text, meta)
+
 
 def _normalize_level(v: str) -> str:
     v = (v or "").strip().lower()
@@ -208,6 +246,21 @@ async def curator_from_chat(req: CuratorFromChatRequest):
     # шаг 1: goals/errors
     extracted = _llm_extract(req.messages, req.topic) or _heuristic_extract(req.messages, req.topic)
     goals, errors = extracted
+
+    # готовим сырые сообщения для оркестратора И для сохранения в память
+    chat_messages_for_orchestrator = [
+        {"role": m.role, "content": m.content}
+        for m in req.messages[-30:]
+    ]
+
+    _save_chat_snapshot(
+        student_id=req.student_id or "default",
+        topic=req.topic or goals or "",
+        messages=chat_messages_for_orchestrator,
+    )
+
+    # шаг 2: оцениваем знания
+
 
     # шаг 2: оцениваем знания
     profile = await curator.assess_student(

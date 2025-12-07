@@ -88,22 +88,17 @@ def save_memory(student_id: str, text: str, meta: dict):
 
 
 def retrieve_memory(query: str, k: int = 3, student_id: Optional[str] = None) -> List[str]:
-    """
-    Быстрый поиск по памяти студента.
-
-    1) Если есть embeddings — используем векторный поиск (pgvector, оператор <->).
-    2) Иначе пробуем триграммы (pg_trgm): ORDER BY similarity(text, %s) DESC.
-    3) Если и это недоступно — просто берём несколько последних записей.
-
-    Возвращаем список text-записей.
-    """
     emb = embed_text(query)
+    print(f"[retrieve_memory] START query={query!r}, student_id={student_id!r}, emb_present={emb is not None}")
+
     with get_conn() as conn:
         # --- 1. Векторный режим (pgvector) ---
         if emb is not None:
             emb_lit = _to_vector_literal(emb)
+            print("[retrieve_memory] Using VECTOR search")
             with conn.cursor(row_factory=dict_row) as cur:
                 if student_id:
+                    print("[retrieve_memory] SQL: vector + student_id")
                     cur.execute(
                         """
                         SELECT text
@@ -115,6 +110,7 @@ def retrieve_memory(query: str, k: int = 3, student_id: Optional[str] = None) ->
                         (student_id, emb_lit, k),
                     )
                 else:
+                    print("[retrieve_memory] SQL: vector, all students")
                     cur.execute(
                         """
                         SELECT text
@@ -125,8 +121,11 @@ def retrieve_memory(query: str, k: int = 3, student_id: Optional[str] = None) ->
                         (emb_lit, k),
                     )
                 rows = cur.fetchall()
+                print(f"[retrieve_memory] VECTOR rows={len(rows)}")
                 if rows:
-                    return [r["text"] for r in rows]
+                    texts = [r["text"] for r in rows]
+                    print(f"[retrieve_memory] VECTOR result sample: {texts[0][:120]!r}")
+                    return texts
 
         # --- 2. Fallback: триграммы (pg_trgm / similarity) ---
         try:

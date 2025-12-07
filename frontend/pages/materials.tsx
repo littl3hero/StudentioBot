@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
 import { generateMaterials, listMaterials, Material } from '../lib/api';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 type StoredProfile = {
     student_id?: string;
@@ -74,6 +78,9 @@ export default function MaterialsPage() {
     }
 
     const hasMaterials = materials && materials.length > 0;
+    const notes = materials.filter((m) => m.type === 'notes');
+    const cheats = materials.filter((m) => m.type === 'cheat_sheet');
+    const links = materials.filter((m) => m.type === 'link');
 
     return (
         <div className="space-y-6">
@@ -139,7 +146,7 @@ export default function MaterialsPage() {
             )}
 
             {/* Список материалов */}
-            <div className="space-y-3">
+            <div className="space-y-6">
                 {initialLoading && (
                     <div className="text-sm text-white/60">
                         Загрузка материалов…
@@ -154,40 +161,141 @@ export default function MaterialsPage() {
                     </div>
                 )}
 
-                {hasMaterials &&
-                    materials.map((m, i) => (
-                        <div key={i} className="card p-4 space-y-2">
-                            <div className="flex items-center justify-between gap-2">
-                                <h2 className="font-semibold text-lg">
-                                    {m.title}
+                {hasMaterials && (
+                    <>
+                        {/* Секция: Конспекты */}
+                        {notes.length > 0 && (
+                            <section className="space-y-3">
+                                <h2 className="text-xl font-semibold">
+                                    Конспекты
                                 </h2>
-                                <span className="text-xs px-2 py-1 rounded-full bg-white/10 text-white/70 capitalize">
-                                    {m.type === 'cheat_sheet'
-                                        ? 'Шпаргалка'
-                                        : m.type === 'notes'
-                                        ? 'Конспект'
-                                        : 'Ссылка'}
-                                </span>
-                            </div>
+                                {notes.map((m, i) => (
+                                    <div
+                                        key={`notes-${i}`}
+                                        className="card p-4 space-y-2"
+                                    >
+                                        <h3 className="font-semibold text-lg">
+                                            {m.title}
+                                        </h3>
 
-                            {m.url && (
-                                <a
-                                    href={m.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-sm text-sky-300 hover:text-sky-200 underline"
-                                >
-                                    Открыть ресурс
-                                </a>
-                            )}
+                                        {m.content && (
+                                            <div className="text-sm text-white/70 leading-tight space-y-1">
+                                                <ReactMarkdown
+                                                    remarkPlugins={[
+                                                        remarkGfm,
+                                                        remarkMath,
+                                                    ]}
+                                                    rehypePlugins={[
+                                                        rehypeKatex,
+                                                    ]}
+                                                    components={{
+                                                        p: ({
+                                                            node,
+                                                            ...props
+                                                        }) => (
+                                                            <p
+                                                                className="mb-2"
+                                                                {...props}
+                                                            />
+                                                        ),
+                                                        li: ({
+                                                            node,
+                                                            ...props
+                                                        }) => (
+                                                            <li
+                                                                className="mb-1"
+                                                                {...props}
+                                                            />
+                                                        ),
+                                                    }}
+                                                >
+                                                    {m.content}
+                                                </ReactMarkdown>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </section>
+                        )}
 
-                            {m.content && (
-                                <p className="text-sm text-white/70 whitespace-pre-wrap">
-                                    {m.content}
-                                </p>
-                            )}
-                        </div>
-                    ))}
+                        {/* Секция: Шпаргалки */}
+                        {cheats.length > 0 && (
+                            <section className="space-y-3">
+                                <h2 className="text-xl font-semibold mt-6">
+                                    Шпаргалки
+                                </h2>
+                                {cheats.map((m, i) => (
+                                    <div
+                                        key={`cheat-${i}`}
+                                        className="card p-4 space-y-2"
+                                    >
+                                        <h3 className="font-semibold text-lg">
+                                            {m.title}
+                                        </h3>
+
+                                        {m.content && (
+                                            <div className="text-sm text-white/70 leading-tight space-y-1">
+                                                <ReactMarkdown
+                                                    remarkPlugins={[
+                                                        remarkGfm,
+                                                        remarkMath,
+                                                    ]}
+                                                    rehypePlugins={[
+                                                        rehypeKatex,
+                                                    ]}
+                                                >
+                                                    {m.content}
+                                                </ReactMarkdown>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </section>
+                        )}
+
+                        {/* Секция: Полезные ссылки */}
+                        {links.length > 0 && (
+                            <section className="space-y-3">
+                                <h2 className="text-xl font-semibold mt-6">
+                                    Полезные ссылки
+                                </h2>
+                                {links.map((m, i) => (
+                                    <div
+                                        key={`link-${i}`}
+                                        className="card p-4 space-y-2"
+                                    >
+                                        <div className="flex items-center justify-between gap-2">
+                                            <h3 className="font-semibold text-lg">
+                                                {m.title}
+                                            </h3>
+                                        </div>
+
+                                        {m.url && (
+                                            <a
+                                                href={m.url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="inline-flex items-center gap-1 text-sm text-sky-300 hover:text-sky-200 underline"
+                                            >
+                                                Открыть ресурс
+                                            </a>
+                                        )}
+
+                                        {m.content && (
+                                            <div className="text-xs text-white/60">
+                                                <ReactMarkdown
+                                                    remarkPlugins={[remarkGfm]}
+                                                >
+                                                    {m.content}
+                                                </ReactMarkdown>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </section>
+                        )}
+                    </>
+                )}
             </div>
         </div>
     );

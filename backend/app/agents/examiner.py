@@ -40,43 +40,76 @@ def _sanitize_question(q: Dict[str, Any], idx: int) -> Dict[str, Any]:
     return {"id": qid, "text": text, "options": opts, "answer": ans}
 
 def _fallback_questions(topics: List[str], weaknesses: List[str], count: int) -> List[Dict[str, Any]]:
-    topics = [t for t in topics if t] or ["базовые понятия"]
-    weaknesses = [w for w in weaknesses if w]
-    qs: List[Dict[str, Any]] = []
-    pool = []
+    """
+    Детерминированный, максимально универсальный фолбэк.
+    """
+    topics = [str(t).strip() for t in (topics or []) if str(t).strip()]
+    weaknesses = [str(w).strip() for w in (weaknesses or []) if str(w).strip()]
 
-    for t in topics[:3]:
-        pool.append({
-            "text": f"Что из нижнего ближе всего к теме «{t}»?",
-            "options": [f"Определение/свойство, относящееся к теме «{t}»",
-                        "Несвязанное утверждение",
-                        "Пример не из этой области",
-                        "Случайное замечание"],
-            "answer": 0
-        })
-    for w in weaknesses[:3]:
-        pool.append({
-            "text": f"Типичная ошибка: «{w}». Как её избежать?",
-            "options": ["Проверять шаги/знаки и промежуточные вычисления",
-                        "Игнорировать промежуточные шаги",
-                        "Запомнить ответ наизусть",
-                        "Не читать условие"],
-            "answer": 0
-        })
-    # добиваем пул нейтральными
+    # Выбираем "главный" текст, чтобы хоть что-то подставлять в вопросы
+    main_label = None
+    if topics:
+        main_label = topics[0]
+    elif weaknesses:
+        main_label = weaknesses[0]
+    else:
+        main_label = "текущей теме"
+
+    pool: List[Dict[str, Any]] = []
+
+    # 1) Вопросы по темам
+    for t in topics[:5]:
+        pool.append(
+            {
+                "text": f"Какое утверждение лучше всего соответствует теме «{t}»?",
+                "options": [
+                    f"Корректное определение, свойство или факт, относящийся к теме «{t}»",
+                    "Утверждение, слабо связанное с темой",
+                    "Полностью несвязанное утверждение",
+                    "Случайный пример без связи с темой",
+                ],
+                "answer": 0,
+            }
+        )
+
+    # 2) Вопросы по слабым местам
+    for w in weaknesses[:5]:
+        pool.append(
+            {
+                "text": f"Типичная ошибка: «{w}». Что поможет её избежать?",
+                "options": [
+                    "Разбирать решение по шагам и осознанно проверять каждый шаг",
+                    "Игнорировать детали и полагаться на интуицию",
+                    "Запоминать готовые ответы без понимания",
+                    "Всегда выбирать самый короткий ответ",
+                ],
+                "answer": 0,
+            }
+        )
+
+    # 3) Если тем/ошибок мало — добавим общие «мета»-вопросы
     while len(pool) < max(3, count):
-        pool.append({
-            "text": "Что означает LIFO?",
-            "options": ["Последним пришёл — первым вышел",
-                        "Первым пришёл — последним вышел",
-                        "Случайный порядок",
-                        "Нет верного"],
-            "answer": 0
-        })
+        pool.append(
+            {
+                "text": f"Что наиболее полезно для закрепления материала по «{main_label}»?",
+                "options": [
+                    "Решать практические задания и разбирать свои ошибки",
+                    "Ничего не повторять и надеяться на удачу",
+                    "Ограничиться одним примером и не смотреть остальные",
+                    "Сосредоточиться только на запоминании терминов",
+                ],
+                "answer": 0,
+            }
+        )
+
     random.shuffle(pool)
+
+    qs: List[Dict[str, Any]] = []
     for i in range(count):
         qs.append(_sanitize_question(pool[i % len(pool)], i))
+
     return qs
+
 
 def _extract_from_snapshot(s: Dict[str, Any]) -> Dict[str, Any]:
     """Пытаемся вытащить topics/weaknesses из meta или из текста."""
@@ -122,12 +155,17 @@ def _llm_generate_questions(
     """
     Генерация вопросов через LLM.
 
-    Теперь сюда дополнительно прилетает memory_texts — список важных записей
-    из памяти студента (его ответы, ошибки, заметки), найденных через эмбеддинги.
+    - Работает для любых тематик (не только математика).
+    - Передаём темы, слабые места и память студента.
+    - Жёстко просим вернуть ЧИСТЫЙ JSON и аккуратно его парсим.
     """
     model = getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-    user = {
-        "topics": topics or ["базовые понятия"],
+
+    topics = [t for t in topics if str(t).strip()]
+    weaknesses = [w for w in weaknesses if str(w).strip()]
+
+    payload = {
+        "topics": topics or ["общие базовые темы"],
         "weaknesses": weaknesses or [],
         "count": count,
         "memory": memory_texts or [],
@@ -141,16 +179,32 @@ def _llm_generate_questions(
             f"{joined}\n"
         )
 
-    prompt = (
-        "Сгенерируй тестовые вопросы (множественный выбор, 4 опции) "
-        "по темам и слабым местам студента.\n"
-        "Учитывай дополнительные записи из памяти студента, если они есть.\n"
-        "Ответ строго JSON:\n"
-        '{ "questions": ['
-        '{"id":"q1","text":"...","options":["...","...","...","..."],"answer":0},'
-        '{"id":"q2","text":"...","options":["...","...","...","..."],"answer":1}'
-        "]}\n"
-        "Без комментариев."
+    system_msg = (
+        "Ты экзаменатор.\n"
+        "Твоя задача — сгенерировать тестовые вопросы с множественным выбором (4 варианта ответа).\n"
+        "Работай с ЛЮБЫМИ темами (школьные, вузовские, программирование, история, что угодно).\n"
+        "Каждый вопрос должен явно относиться хотя бы к одной теме или слабому месту студента.\n"
+        "Не придумывай вопросы на темы, которых НЕТ в списке.\n"
+        "Ответь СТРОГО одним JSON-объектом БЕЗ пояснений, комментариев и текста вокруг.\n"
+        "Формат:\n"
+        "{\n"
+        '  \"questions\": [\n'
+        '    {\"id\": \"q1\", \"text\": \"...\","'
+        ' \"options\": [\"...\",\"...\",\"...\",\"...\"], \"answer\": 0},\n'
+        '    {\"id\": \"q2\", \"text\": \"...\","'
+        ' \"options\": [\"...\",\"...\",\"...\",\"...\"], \"answer\": 1}\n'
+        "  ]\n"
+        "}\n"
+        "Где:\n"
+        "- answer — это индекс правильного варианта (0, 1, 2 или 3).\n"
+        "- Не добавляй никакие другие поля.\n"
+    )
+
+    user_msg = (
+        "Вот данные о студенте и его контексте:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "Сгенерируй ровно {count} вопросов.\n"
+        "Все вопросы должны быть содержательно связаны с этими темами/слабыми местами."
         f"{memory_block}"
     )
 
@@ -158,21 +212,45 @@ def _llm_generate_questions(
         model=model,
         temperature=0.3,
         messages=[
-            {"role": "system", "content": "Ты экзаменатор. Дай только валидный JSON по образцу."},
-            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
         ],
     )
-    text = resp.choices[0].message.content or "{}"
-    data = json.loads(text)
-    raw = data.get("questions", [])
+
+    raw = resp.choices[0].message.content or "{}"
+    cleaned = raw.strip()
+
+    # --- аккуратно убираем ```json ... ``` если модель так ответила ---
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    # --- пытаемся вытащить JSON-объект по первым/последним фигурным скобкам ---
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"Examiner LLM: no-json-in-output: {cleaned[:200]}")
+
+    json_str = cleaned[start : end + 1]
+    data = json.loads(json_str)
+
+    raw_questions = data.get("questions") or []
     out: List[Dict[str, Any]] = []
-    for i, q in enumerate(raw):
-        out.append(_sanitize_question(q, i))
-    # гарантируем нужное количество
+
+    for i, q in enumerate(raw_questions):
+        if isinstance(q, dict):
+            out.append(_sanitize_question(q, i))
+
+    # если LLM дал меньше, чем нужно — добиваем фолбэком
     if len(out) < count:
         out.extend(_fallback_questions(topics, weaknesses, count - len(out)))
+
     return out[:count]
+
 
 
 def generate_exam(count: int = 5, student_id: str = "default") -> Dict[str, Any]:

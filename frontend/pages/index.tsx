@@ -1,6 +1,10 @@
 // pages/index.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 /** ===== Конфиг API (без новых файлов/прокси) =====
  * Укажи во фронтовом .env.local:
@@ -71,6 +75,15 @@ function parseSSELines(chunk: string): string[] {
         start = idx + 2;
     }
     return lines;
+}
+
+function normalizeMathDelimiters(content: string): string {
+    // Очень грубо, но для чата ок:
+    return content
+        .replace(/\\\(/g, '$')
+        .replace(/\\\)/g, '$')
+        .replace(/\\\[/g, '$$')
+        .replace(/\\\]/g, '$$');
 }
 
 async function* ssePost(url: string, body: any): AsyncGenerator<string> {
@@ -402,8 +415,13 @@ export default function HomePage() {
                                 ? 'A'
                                 : 'S'}
                         </div>
-                        <div className="whitespace-pre-wrap leading-relaxed">
-                            {m.content}
+                        <div className="prose prose-invert max-w-none leading-relaxed">
+                            <ReactMarkdown
+                                remarkPlugins={[remarkGfm, remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                            >
+                                {normalizeMathDelimiters(m.content)}
+                            </ReactMarkdown>
                         </div>
                     </div>
                 ))}

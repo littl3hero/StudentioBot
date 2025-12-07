@@ -1,5 +1,7 @@
 import '../styles/globals.css';
 import type { AppProps } from 'next/app';
+import 'katex/dist/katex.min.css'; // <-- вот это важно для формул
+import '../styles/globals.css'; // если у тебя есть общий css
 import { Sidebar } from '../components/Sidebar';
 
 export default function MyApp({ Component, pageProps }: AppProps) {

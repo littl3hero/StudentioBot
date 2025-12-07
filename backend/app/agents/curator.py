@@ -169,13 +169,23 @@ async def assess_student(goals: str, errors: list[str], level: str, student_id: 
     # 4) сохраняем новое знание в память (не падает даже без эмбеддингов)
     try:
         text_for_memory = (
-            "=== CURATOR ASSESSMENT ===\n"
-            f"student_id: {student_id}\n"
-            f"goals: {goals or '—'}\n"
-            f"errors: {', '.join(errs) if errs else '—'}\n"
-            f"profile: {json.dumps(profile_data, ensure_ascii=False)}"
+            f"Куратор оценил ученика.\n"
+            f"Цели: {goals or '—'}.\n"
+            f"Ошибки: {', '.join(errs) if errs else '—'}.\n"
+            f"Уровень: {profile_data.get('level')}.\n"
+            f"Краткий совет: {profile_data.get('advice', '')[:200]}"
         )
-        save_memory(student_id, text_for_memory, {"level": profile_data["level"], "goals": goals, "errors": errs})
+        save_memory(
+            student_id,
+            text_for_memory,
+            {
+                "kind": "curator_assessment",
+                "level": profile_data.get("level"),
+                "goals": goals,
+                "errors": errs,
+                "profile": profile_data,  # полный JSON, если надо вытащить
+            },
+        )
     except Exception as e:
         print(f"[curator] save_memory failed: {e}")
 
