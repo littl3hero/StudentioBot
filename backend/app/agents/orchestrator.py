@@ -363,13 +363,23 @@ def _agent_plan(
             "У тебя есть профиль ученика и несколько специализированных агентов, "
             "с которыми ты можешь общаться через инструменты (tools):\n"
             "- curator_agent      → анализирует профиль и память;\n"
-            "- examiner_agent     → готовит персональные тесты;\n"
+            "- examiner_agent     → готовит персональные тесты (и САМ выбирает число вопросов);\n"
             "- materials_agent    → создаёт учебные материалы;\n"
             "а также вспомогательные инструменты get_materials_summary, "
             "get_student_profile, get_recent_memory.\n\n"
             "Твоя задача — построить учебный план из 2–4 шагов.\n"
-            "Финальный ответ ДОЛЖЕН быть строго в формате JSON (см. далее)."
+            "Финальный ответ ДОЛЖЕН быть строго в формате JSON (см. далее).\n\n"
+            "ВАЖНО:\n"
+            "- Если в плане есть хотя бы один шаг с типом \"exam\", ты ОБЯЗАТЕЛЬНО\n"
+            "  должен РОВНО ОДИН РАЗ вызвать инструмент examiner_agent, чтобы заранее\n"
+            "  подготовить персональный тест для этого студента.\n"
+            "- examiner_agent сам выбирает разумное количество вопросов (обычно 3–10),\n"
+            "  тебе не нужно это решать вручную.\n"
+            "- Из ответа examiner_agent можешь взять краткое резюме и положить его\n"
+            "  в поле meta соответствующего шага плана."
         )
+
+
 
         # создаём агента нового типа
         agent = create_agent(llm, tools=tools, system_prompt=system_prompt)
@@ -591,6 +601,29 @@ async def plan_and_execute(
                 auto_route = "/materials"
             elif stype == "chat":
                 auto_route = None
+    
+    if next_agent == "materials" or auto_route == "/materials":
+        try:
+            print("[orchestrator.plan_and_execute] ensuring materials exist...")
+            existing = materials_agent.get_materials_for_student(
+                student_id=student_id
+            )
+            if existing:
+                print(
+                    f"[orchestrator.plan_and_execute] found {len(existing)} materials, skip generation"
+                )
+            else:
+                print(
+                    "[orchestrator.plan_and_execute] no materials yet, generating..."
+                )
+                materials_agent.generate_and_save_materials(student_id=student_id)
+
+            if primary_step is not None:
+                primary_step["status"] = "prepared"
+        except Exception as e:
+            print(
+                f"[orchestrator.plan_and_execute] pre-generate materials failed: {e}"
+            )
 
     return {
         "instruction_message": instruction,

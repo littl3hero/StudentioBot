@@ -60,7 +60,7 @@ export async function curatorFromChat(input: {
         body: JSON.stringify(input),
     });
     if (!r.ok) throw new Error(`curator/from_chat failed: ${r.status}`);
-    return r.json(); // { ok, topic, goals, errors, profile, exam? }
+    return r.json(); // { ok, topic, goals, errors, profile, exam?, orchestrator? }
 }
 
 export async function examinerGenerate(
@@ -101,9 +101,24 @@ export type Material = {
     content?: string | null;
 };
 
+/** meta от умного MaterialsAgent (через LangChain) */
+export type MaterialsMeta = {
+    status?: string;
+    comment?: string; // человекочитаемое резюме: "что я тебе подготовил"
+    study_suggestions?: string[]; // список шагов "1) начни с..., 2) потом ..."
+    focus_topics?: string[];
+    weaknesses?: string[];
+};
+
+export type GenerateMaterialsResponse = {
+    ok: boolean;
+    materials: Material[];
+    meta?: MaterialsMeta;
+};
+
 export async function generateMaterials(
     student_id: string = 'default'
-): Promise<{ ok: boolean; materials: Material[] }> {
+): Promise<GenerateMaterialsResponse> {
     const r = await fetch(`${API_BASE}/v1/agents/materials/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

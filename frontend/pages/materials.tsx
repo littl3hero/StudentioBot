@@ -64,11 +64,21 @@ export default function MaterialsPage() {
         setGenerating(true);
         setError(null);
         try {
-            // 1) сгенерили и сохранили в БД
-            await generateMaterials(studentId);
-            // 2) вытянули ВСЕ материалы этого студента
+            // 1) просим бэкенд сгенерить материалы + получить meta от MaterialsAgent
+            const resp = await generateMaterials(studentId);
+
+            // 2) вытягиваем все материалы этого студента (на всякий случай — как и раньше)
             const all = await listMaterials(studentId);
             setMaterials(all);
+
+            // 3) сохраняем комментарий и рекомендации
+            if (resp?.meta) {
+                setMaterialsComment(resp.meta.comment || null);
+                setStudySuggestions(resp.meta.study_suggestions || []);
+            } else {
+                setMaterialsComment(null);
+                setStudySuggestions([]);
+            }
         } catch (e) {
             console.error(e);
             setError('Ошибка при генерации материалов. Попробуй ещё раз.');
@@ -81,6 +91,10 @@ export default function MaterialsPage() {
     const notes = materials.filter((m) => m.type === 'notes');
     const cheats = materials.filter((m) => m.type === 'cheat_sheet');
     const links = materials.filter((m) => m.type === 'link');
+    const [materialsComment, setMaterialsComment] = useState<string | null>(
+        null
+    );
+    const [studySuggestions, setStudySuggestions] = useState<string[]>([]);
 
     return (
         <div className="space-y-6">
@@ -139,9 +153,21 @@ export default function MaterialsPage() {
                 </button>
             </div>
 
-            {error && (
-                <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl p-3">
-                    {error}
+            {/* Рекомендации от MaterialsAgent */}
+            {(materialsComment || studySuggestions.length > 0) && (
+                <div className="card p-4 space-y-2">
+                    {materialsComment && (
+                        <p className="text-sm text-white/80">
+                            {materialsComment}
+                        </p>
+                    )}
+                    {studySuggestions.length > 0 && (
+                        <ul className="list-disc pl-5 text-sm text-white/70 space-y-1">
+                            {studySuggestions.map((line, idx) => (
+                                <li key={idx}>{line}</li>
+                            ))}
+                        </ul>
+                    )}
                 </div>
             )}
 

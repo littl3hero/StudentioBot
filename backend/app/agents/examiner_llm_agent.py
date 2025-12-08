@@ -120,20 +120,25 @@ def run_examiner_agent(
         # tool, который реально вызывает examiner.generate_exam и сохраняет экзамен
         @lc_tool
         def generate_exam_for_student(
-            count: int = safe_count,
+            count: int,
             topic_hint: Optional[str] = default_topic_hint,
         ) -> str:
             """
             generate_exam_for_student:
             Сгенерировать и сохранить тренировочный тест для текущего студента.
             Аргументы: count (1–20) и topic_hint (строка с темой/подтемой).
-            Возвращает JSON: {status, questions_prepared, topic_hint}.
+
+            ВАЖНО: Всегда явно указывай разумное значение count,
+            исходя из уровня студента:
+            - beginner: 3–5 вопросов
+            - intermediate: 5–7
+            - advanced: 7–10
             """
             try:
                 try:
                     safe_c = max(1, min(20, int(count)))
                 except Exception:
-                    safe_c = safe_count
+                    safe_c = 5
 
                 data = examiner.generate_exam(count=safe_c, student_id=student_id)
 
@@ -154,6 +159,7 @@ def run_examiner_agent(
                 err = {"status": "error", "error": str(e)}
                 return json.dumps(err, ensure_ascii=False)
 
+
         tools = [generate_exam_for_student]
 
         ctx = {
@@ -167,18 +173,23 @@ def run_examiner_agent(
             "Ты — ExaminerAgent, специализированный агент-Экзаменатор.\n"
             "У тебя есть профиль студента и инструмент generate_exam_for_student, "
             "который реально создаёт и сохраняет тест.\n\n"
-            "Твоя задача — подготовить разумный тренировочный экзамен по нужной теме/темам.\n\n"
+            "Твоя задача — подготовить разумный тренировочный экзамен по нужной теме(НЕ АБСТРАКТНЫЙ!ДЛЯ ПОНИМАНИЯ ПРАКТИЧЕСКИХ ЗНАНИЙ!).\n\n"
             "Требования:\n"
             "- Вызови generate_exam_for_student РОВНО ОДИН раз.\n"
-            "- Выбери осмысленное число вопросов (обычно 3–10) и тему/подтему.\n\n"
+            "- ВСЕГДА явно передавай аргумент count:\n"
+            "    * для новичка (beginner): 3–5 вопросов,\n"
+            "    * для среднего уровня (intermediate): 5–7 вопросов,\n"
+            "    * для продвинутого (advanced): 7–10 вопросов.\n"
+            "- Не полагайся на значение requested_count, выбирай count сам из диапазона выше.\n\n"
             "Финальный ответ верни строго в формате JSON без пояснений вокруг:\n"
             "{\n"
             '  \"status\": \"ok\" | \"error\",\n'
-            '  \"questions_prepared\": 5,\n'
+            '  \"questions_prepared\": (от 3 до 10),\n'
             '  \"topic_hint\": \"строка с темой\",\n'
             '  \"comment\": \"краткое пояснение, какой тест подготовлен\"\n'
             "}\n"
         )
+
 
         agent = create_agent(model=llm, tools=tools, system_prompt=system_prompt)
 

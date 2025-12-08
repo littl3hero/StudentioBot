@@ -266,8 +266,6 @@ export default function HomePage() {
                 level,
                 topic,
                 messages,
-                make_exam: false,
-                count: 5,
             };
 
             await wakeBackend();

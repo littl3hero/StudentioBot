@@ -2,6 +2,10 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
 import { examinerGenerate } from '../lib/api';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:10000';
 
@@ -25,6 +29,14 @@ type AfterExamResponse = {
     };
 };
 
+function normalizeMathDelimiters(content: string): string {
+    return content
+        .replace(/\\\(/g, '$')
+        .replace(/\\\)/g, '$')
+        .replace(/\\\[/g, '$$')
+        .replace(/\\\]/g, '$$');
+}
+
 export default function TestsPage() {
     const [count, setCount] = useState(5);
     const [loading, setLoading] = useState(false);
@@ -38,17 +50,25 @@ export default function TestsPage() {
     const router = useRouter();
 
     useEffect(() => {
-        // необязательно: подтянем «срез профиля» из localStorage,
-        // чтобы, например, менять дефолтное число вопросов по уровню
+        let initialCount = 5;
+
         try {
             const raw = localStorage.getItem('studentio_profile');
             if (raw) {
                 const p = JSON.parse(raw);
-                if (p?.level === 'advanced') setCount(8);
+                if (p?.level === 'advanced') {
+                    initialCount = 8;
+                }
             }
         } catch {
-            // игнорируем
+            // если что-то пошло не так — пусть будет 5
         }
+
+        setCount(initialCount);
+
+        // СРАЗУ тянем экзамен
+        generate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     async function generate() {
@@ -60,8 +80,8 @@ export default function TestsPage() {
         setNextError(null);
 
         try {
-            // вытащим student_id из того же профиля, что сохраняет куратор
-            let student_id = 'default';
+            // 1) достаем student_id из того же профиля, что заполняет Куратор
+            let student_id: string | null = null;
             try {
                 const raw = localStorage.getItem('studentio_profile');
                 if (raw) {
@@ -71,15 +91,33 @@ export default function TestsPage() {
                     }
                 }
             } catch {
-                // если что-то пошло не так — используем 'default'
+                // игнорируем, student_id останется null
             }
 
+            if (!student_id) {
+                // нет профиля → просим вернуться к Куратору
+                setNextError(
+                    'Не найден Student ID. Сначала пообщайся с Куратором и нажми «Оценить по теме».'
+                );
+                return;
+            }
+
+            // 2) выстрел на бэк
+            // backend сам: если есть prepared_exam → вернет его,
+            // иначе сгенерит новый
             const data = await examinerGenerate(count, student_id);
-            setQuestions((data?.questions || []).slice(0, count));
+
+            const qs: Question[] = data?.questions || [];
+            setQuestions(qs);
+
+            // реальное количество берем из ответа
+            if (qs.length > 0) {
+                setCount(qs.length);
+            }
+
             setRubric(data?.rubric || '');
         } catch (e) {
             console.error(e);
-            // fallback, чтобы UI не ломался
             setQuestions([
                 {
                     id: 'q1',
@@ -208,9 +246,16 @@ export default function TestsPage() {
 
             {questions.map((q, idx) => (
                 <div key={q.id} className="card p-5 space-y-2">
-                    <div className="font-medium">
-                        {idx + 1}. {q.text}
+                    <div className="font-medium prose prose-invert max-w-none">
+                        {idx + 1}.{' '}
+                        <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkMath]}
+                            rehypePlugins={[rehypeKatex]}
+                        >
+                            {normalizeMathDelimiters(q.text)}
+                        </ReactMarkdown>
                     </div>
+
                     <div className="text-xs text-white/50">
                         {q.difficulty ? `Сложность: ${q.difficulty}` : ''}
                     </div>
@@ -227,14 +272,42 @@ export default function TestsPage() {
                                     checked={answers[q.id] === i}
                                     onChange={() => mark(q.id, i)}
                                 />
-                                <span>{opt}</span>
+                                <span className="text-sm">
+                                    <ReactMarkdown
+                                        remarkPlugins={[remarkGfm, remarkMath]}
+                                        rehypePlugins={[rehypeKatex]}
+                                    >
+                                        {normalizeMathDelimiters(opt)}
+                                    </ReactMarkdown>
+                                </span>
                             </label>
                         ))}
                     </div>
                     {typeof q.answer === 'number' && score && (
-                        <div className="text-sm text-white/70">
-                            Правильный: {q.options[q.answer]}
-                            {q.solution ? ` • Разбор: ${q.solution}` : ''}
+                        <div className="text-sm text-white/70 space-y-1">
+                            <div className="flex gap-1">
+                                <span>Правильный:</span>
+                                <ReactMarkdown
+                                    remarkPlugins={[remarkGfm, remarkMath]}
+                                    rehypePlugins={[rehypeKatex]}
+                                >
+                                    {normalizeMathDelimiters(
+                                        q.options[q.answer]
+                                    )}
+                                </ReactMarkdown>
+                            </div>
+
+                            {q.solution && (
+                                <div className="flex gap-1">
+                                    <span>Разбор:</span>
+                                    <ReactMarkdown
+                                        remarkPlugins={[remarkGfm, remarkMath]}
+                                        rehypePlugins={[rehypeKatex]}
+                                    >
+                                        {normalizeMathDelimiters(q.solution)}
+                                    </ReactMarkdown>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

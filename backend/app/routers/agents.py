@@ -9,7 +9,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.deps import settings
-from app.agents import curator, examiner, materials_agent, orchestrator  # ← добавлен materials_agent и orchestrator
+from app.agents import curator, examiner, materials_agent, orchestrator, materials_llm_agent  # ← добавлен materials_agent и orchestrator
 
 from app.memory.vector_store_pg import save_memory
 
@@ -396,11 +396,38 @@ class MaterialsRequest(BaseModel):
     student_id: str = "default"
 
 
-@router.post("/materials/generate")
+class MaterialsGenerateResponse(BaseModel):
+    ok: bool
+    materials: List[Dict[str, Any]]
+    meta: Optional[Dict[str, Any]] = None
+
+
+@router.post("/materials/generate", response_model=MaterialsGenerateResponse)
 def generate_materials(req: MaterialsRequest):
-    """Генерирует персонализированные материалы для студента."""
-    materials = materials_agent.generate_and_save_materials(req.student_id)
-    return {"ok": True, "materials": materials}
+    """
+    Генерирует/обновляет материалы для студента
+    и возвращает ещё meta от MaterialsAgent (комментарий + рекомендации).
+    """
+    student_id = req.student_id or "default"
+
+    # Профиль достаём так же, как внутри materials_agent,
+    # чтобы MaterialsAgent понимал темы/слабые места.
+    try:
+        profile = materials_agent._extract_profile(student_id)  # type: ignore[attr-defined]
+    except Exception as e:
+        print(f"[agents.generate_materials] _extract_profile failed: {e}")
+        profile = {"level": "beginner", "topics": [], "weaknesses": []}
+
+    # Запускаем умного MaterialsAgent (через LangChain или фолбэк)
+    meta = materials_llm_agent.run_materials_agent(
+        student_id=student_id,
+        profile=profile,
+    )
+
+    # Берём актуальные материалы из БД
+    materials = materials_agent.get_materials_for_student(student_id)
+
+    return {"ok": True, "materials": materials, "meta": meta}
 
 
 @router.get("/materials")
