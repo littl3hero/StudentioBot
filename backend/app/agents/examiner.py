@@ -211,6 +211,7 @@ def _llm_generate_questions(
     resp = client.chat.completions.create(
         model=model,
         temperature=0.3,
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
